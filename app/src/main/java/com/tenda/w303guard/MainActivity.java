@@ -418,24 +418,53 @@ public class MainActivity extends Activity {
     }
 
     private void scanWirelessStage() {
-        clickRouterLabel("Wireless", found -> {
-            if (!found) {
-                finishFullScan(false, "قُرئت DHCP، لكن لم أجد تبويب Wireless. افتح Wireless Connection Status يدوياً.");
-                return;
+        // Firmware V5.07.46_en exposes the wireless table at this verified path.
+        // The old label-click sequence could fail because the submenu is rendered
+        // inside the router's frame and may not be ready when the parent tab changes.
+        // Navigate the existing content frame directly instead of relying on UI text.
+        if (scanMetaView != null) {
+            scanMetaView.setText("اكتملت قراءة DHCP. جارٍ فتح صفحة Wireless Connection Status مباشرة...");
+        }
+        navigateRouterContentPath("/wireless_state.asp", navigated -> {
+            if (!navigated) {
+                // Last-resort route: load the verified local page directly in the same
+                // WebView session. This keeps the router cookies/session intact.
+                status("لم أجد إطار المحتوى؛ أفتح صفحة Wireless Connection Status بالمسار المحلي المباشر.");
+                webView.loadUrl("http://" + activeHost + "/wireless_state.asp");
+            } else {
+                status("تم توجيه إطار الراوتر إلى Wireless Connection Status.");
             }
-            handler.postDelayed(() -> clickRouterLabel("Wireless Connection Status", childFound -> {
-                if (!childFound) {
-                    finishFullScan(false, "قُرئت DHCP، لكن لم أجد Wireless Connection Status.");
-                    return;
-                }
-                handler.postDelayed(() -> readDevicesFromPage(() -> {
-                    boolean complete = hasDhcpSnapshot && hasWirelessSnapshot;
-                    finishFullScan(complete, complete
-                            ? "اكتملت قراءة DHCP وWi-Fi ودمج الأجهزة بنجاح."
-                            : "انتهت المحاولة، لكن إحدى القائمتين لم تُقرأ. راجع آخر النتائج أو افتح الصفحة يدوياً.");
-                }), 1100);
-            }), 1200);
+            handler.postDelayed(() -> readDevicesFromPage(() -> {
+                boolean complete = hasDhcpSnapshot && hasWirelessSnapshot;
+                finishFullScan(complete, complete
+                        ? "اكتملت قراءة DHCP وWi-Fi ودمج الأجهزة بنجاح."
+                        : "قُرئت DHCP، لكن لم تكتمل قراءة Wi-Fi. افتح Wireless Connection Status يدوياً ثم أعد القراءة.");
+            }), navigated ? 1400 : 1900);
         });
+    }
+
+    /**
+     * Navigate the router's existing same-origin content frame to a verified
+     * local page path. This is more reliable than matching translated/menu text.
+     * Returns false when no suitable frame or exact href is present.
+     */
+    private void navigateRouterContentPath(String targetPath, BooleanResult callback) {
+        String js = "(function(){" +
+                "var target=" + JSONObject.quote(targetPath) + ";" +
+                "function path(u){try{return new URL(u,location.href).pathname;}catch(e){return '';}}" +
+                "var seen=[];" +
+                "function walk(w){try{for(var i=0;i<w.frames.length;i++){var f=w.frames[i],p='';" +
+                "try{p=path(f.location.href);}catch(e){}" +
+                "if(p===target)return true;" +
+                "if(p==='/lan_dhcp_clients.asp'||p==='/wireless_basic.asp'||p==='/wireless_state.asp'){" +
+                "try{f.location.href=target;return true;}catch(e){}}" +
+                "if(walk(f))return true;}}catch(e){}return false;}" +
+                "if(walk(window))return true;" +
+                "var docs=[document];for(var x=0;x<docs.length;x++){try{var fs=docs[x].querySelectorAll('frame,iframe');" +
+                "for(var j=0;j<fs.length;j++){try{var d=fs[j].contentDocument;if(d&&docs.indexOf(d)<0)docs.push(d);}catch(e){}}" +
+                "var as=docs[x].querySelectorAll('a');for(var k=0;k<as.length;k++){if(path(as[k].href)===target){as[k].click();return true;}}}catch(e){}}" +
+                "return false;})()";
+        webView.evaluateJavascript(js, result -> callback.onResult("true".equals(result)));
     }
 
     private void finishFullScan(boolean success, String message) {

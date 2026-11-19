@@ -10,8 +10,8 @@ android {
         applicationId 'com.tenda.w303guard'
         minSdk 23
         targetSdk 28
-        versionCode 5
-        versionName '0.2.3-subscriber-dashboard'
+        versionCode 6
+        versionName '0.2.4-wireless-frame-navigation'
     }
 
     compileOptions {
