@@ -1,9 +1,11 @@
 package com.tenda.w303guard;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.net.Uri;
@@ -37,6 +39,8 @@ import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.LinkedHashSet;
 
 /**
@@ -58,6 +62,8 @@ public class MainActivity extends Activity {
     private TextView pageView;
     private TextView devicesView;
     private TextView diagnosticView;
+    private LinearLayout deviceCards;
+    private SharedPreferences preferences;
     private String activeHost = DEFAULT_ROUTER;
     private String lastDiagnostic = "";
     private String lastDevices = "";
@@ -65,10 +71,13 @@ public class MainActivity extends Activity {
     private final Map<String, JSONObject> wirelessSnapshot = new LinkedHashMap<>();
     private boolean hasDhcpSnapshot = false;
     private boolean hasWirelessSnapshot = false;
+    private long dhcpSnapshotAt = 0L;
+    private long wirelessSnapshotAt = 0L;
 
     @Override
     public void onCreate(Bundle state) {
         super.onCreate(state);
+        preferences = getSharedPreferences("tenda_w303_guard", MODE_PRIVATE);
         buildUi();
         configureWebView();
     }
@@ -96,7 +105,7 @@ public class MainActivity extends Activity {
         connection.addView(text("عنوان الراوتر", 14, true, DARK), matchWrap());
         routerIp = new EditText(this);
         routerIp.setSingleLine(true);
-        routerIp.setText(DEFAULT_ROUTER);
+        routerIp.setText(preferences.getString("router_ip", DEFAULT_ROUTER));
         routerIp.setTextDirection(View.TEXT_DIRECTION_LTR);
         routerIp.setInputType(InputType.TYPE_CLASS_PHONE);
         routerIp.setPadding(dp(12), dp(8), dp(12), dp(8));
@@ -139,7 +148,22 @@ public class MainActivity extends Activity {
         webView = new WebView(this);
         webView.setBackgroundColor(Color.WHITE);
         browserCard.addView(webView, new LinearLayout.LayoutParams(-1, dp(480)));
-        TextView webHint = text("سجّل الدخول داخل صفحة الراوتر نفسها. لا تكتب كلمة المرور في أي حقل داخل التطبيق خارج صفحة الإدارة المحلية.", 12, false, MUTED);
+        LinearLayout browserActions = new LinearLayout(this);
+        browserActions.setOrientation(LinearLayout.HORIZONTAL);
+        Button reloadPage = button("تحديث الصفحة", false);
+        reloadPage.setOnClickListener(v -> {
+            if (webView.getUrl() == null) toast("اتصل بالراوتر أولاً.");
+            else { status("أعيد تحميل صفحة الراوتر..."); webView.reload(); }
+        });
+        Button routerHome = button("الصفحة الرئيسية", false);
+        routerHome.setOnClickListener(v -> {
+            if (webView.getUrl() == null) connectToRouter();
+            else webView.loadUrl("http://" + activeHost + "/");
+        });
+        browserActions.addView(reloadPage, new LinearLayout.LayoutParams(0, -2, 1));
+        browserActions.addView(routerHome, new LinearLayout.LayoutParams(0, -2, 1));
+        browserCard.addView(browserActions, matchWrap());
+        TextView webHint = text("سجّل الدخول داخل صفحة الراوتر نفسها. بعد فتح صفحة DHCP أو Wireless سيحاول التطبيق قراءة الجدول تلقائياً. لا تكتب كلمة المرور خارج صفحة الإدارة المحلية.", 12, false, MUTED);
         browserCard.addView(webHint, matchWrap());
 
         gap(root, 10);
@@ -154,14 +178,17 @@ public class MainActivity extends Activity {
         Button copy = button("نسخ تقرير التشخيص", false);
         copy.setOnClickListener(v -> copyDiagnostic());
         tools.addView(copy, matchWrap());
-        devicesView = text("افتح DHCP Client List ثم اقرأ القائمة، وبعدها افتح Wireless Connection Status واقرأ القائمة اللاسلكية. سيجمع التطبيق السجلين باستخدام MAC Address.", 12, false, DARK);
+        devicesView = text("افتح DHCP Client List ثم Wireless Connection Status. سيحاول التطبيق قراءة الجدول تلقائياً عند تحميل الصفحة، ويمكنك الضغط على زر القراءة عند الحاجة.", 12, false, DARK);
         devicesView.setTextIsSelectable(true);
         tools.addView(devicesView, matchWrap());
+        deviceCards = new LinearLayout(this);
+        deviceCards.setOrientation(LinearLayout.VERTICAL);
+        tools.addView(deviceCards, matchWrap());
         diagnosticView = text("تقرير الصفحة: لم يتم الفحص بعد.", 11, false, MUTED);
         diagnosticView.setTextIsSelectable(true);
         tools.addView(diagnosticView, matchWrap());
 
-        TextView footer = text("الإصدار الأول تشخيصي وآمن: لا يغيّر إعدادات الراوتر ولا يرسل أوامر حظر تلقائياً قبل التحقق من أسماء الحقول الفعلية لهذا الـ Firmware.", 12, true, MUTED);
+        TextView footer = text("الإصدار 0.2.2: قراءة جداول DHCP وWi-Fi من الإطارات الداخلية مع مطابقة أعمدة الجدول وإعادة المحاولة عند تأخر تحميل الإطار. لا ينفذ الحظر أو تحديد السرعة حتى نتحقق من نماذج الراوتر الفعلية.", 12, true, MUTED);
         footer.setPadding(dp(4), dp(12), dp(4), dp(4));
         root.addView(footer, matchWrap());
 
@@ -208,11 +235,39 @@ public class MainActivity extends Activity {
             }
 
             @Override
+            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                super.onPageStarted(view, url, favicon);
+                if (pageView != null) pageView.setText("جارٍ تحميل: " + url);
+                status("جارٍ الاتصال بواجهة الراوتر...");
+            }
+
+            @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
                 pageView.setText("الصفحة الحالية: " + url);
+                if (!isAllowedRouterUri(Uri.parse(url))) return;
                 status("تم تحميل صفحة الراوتر. إذا ظهرت شاشة الدخول، سجّل الدخول من داخلها.");
-                handler.postDelayed(() -> inspectCurrentPage(), 500);
+                // Read supported tables automatically after the router page settles.
+                handler.postDelayed(() -> {
+                    if (webView != null && webView.getUrl() != null) {
+                        inspectCurrentPage();
+                        readDevicesFromPage();
+                    }
+                }, 850);
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request, android.webkit.WebResourceError error) {
+                super.onReceivedError(view, request, error);
+                if (request.isForMainFrame()) {
+                    status("تعذر تحميل صفحة الراوتر: " + error.getDescription() + ". تأكد من اتصال الهاتف بشبكة الراوتر وعنوانه.");
+                }
+            }
+
+            @Override
+            public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse response) {
+                super.onReceivedHttpError(view, request, response);
+                if (request.isForMainFrame()) status("أعاد الراوتر خطأ HTTP: " + response.getStatusCode());
             }
         });
     }
@@ -224,12 +279,16 @@ public class MainActivity extends Activity {
             return;
         }
         activeHost = ip;
+        preferences.edit().putString("router_ip", ip).apply();
         lastDiagnostic = "";
         lastDevices = "";
         dhcpSnapshot.clear();
         wirelessSnapshot.clear();
         hasDhcpSnapshot = false;
         hasWirelessSnapshot = false;
+        dhcpSnapshotAt = 0L;
+        wirelessSnapshotAt = 0L;
+        if (deviceCards != null) deviceCards.removeAllViews();
         devicesView.setText("لم تتم قراءة الأجهزة بعد.");
         diagnosticView.setText("سيظهر تقرير الصفحة بعد تحميل واجهة الراوتر.");
         webView.loadUrl("http://" + activeHost + "/");
@@ -272,40 +331,78 @@ public class MainActivity extends Activity {
     private void clickRouterLabel(String label, BooleanResult callback) {
         String script = "(function(){" +
                 "function docs(){var a=[document];for(var i=0;i<a.length;i++){try{var fs=a[i].querySelectorAll('frame,iframe');for(var j=0;j<fs.length;j++){try{var d=fs[j].contentDocument;if(d&&a.indexOf(d)<0)a.push(d);}catch(e){}}}catch(e){}}return a;}" +
+                "function norm(s){return (s||'').replace(/\\s+/g,' ').trim().toLowerCase();}" +
                 "var ds=docs(),q=" + JSONObject.quote(label.toLowerCase(Locale.ROOT)) + ";" +
-                "for(var i=0;i<ds.length;i++){var es=ds[i].querySelectorAll('a,button,input[type=button],input[type=submit],area');for(var j=0;j<es.length;j++){var e=es[j],t=((e.innerText||e.textContent||e.value||e.title||'')+'').replace(/\\s+/g,' ').trim().toLowerCase();if(t===q||t.indexOf(q)>=0){e.click();return true;}}}return false;})()";
+                "for(var i=0;i<ds.length;i++){var es=ds[i].querySelectorAll('a,button,input[type=button],input[type=submit],area,[onclick],[role=button],img[alt],[title]');" +
+                "for(var j=0;j<es.length;j++){var e=es[j],t=norm((e.innerText||e.textContent||e.value||'')+' '+(e.title||'')+' '+(e.alt||''));" +
+                "if(t===q||t.indexOf(q)>=0){var target=e.closest?e.closest('a,button,[onclick],[role=button]'):null;if(!target)target=e;try{target.scrollIntoView({block:'center'});}catch(x){};target.click();return true;}}}return false;})()";
         webView.evaluateJavascript(script, result -> callback.onResult("true".equals(result)));
     }
 
     private void readDevicesFromPage() {
+        readDevicesFromPageAttempt(0);
+    }
+
+    /**
+     * The W303R V5.07.46 DHCP and wireless pages are rendered in same-origin
+     * frames. Retry briefly because Android WebView may finish the parent page
+     * before the child frame has populated its table.
+     */
+    private void readDevicesFromPageAttempt(int attempt) {
+        if (webView == null || webView.getUrl() == null) {
+            toast("اتصل بالراوتر وسجّل الدخول أولاً.");
+            return;
+        }
+        final int currentAttempt = attempt;
         String js = "(function(){" +
-                "function docs(){var a=[document];for(var i=0;i<a.length;i++){try{var fs=a[i].querySelectorAll('frame,iframe');for(var j=0;j<fs.length;j++){try{var d=fs[j].contentDocument;if(d&&a.indexOf(d)<0)a.push(d);}catch(e){}}}catch(e){}}return a;}" +
-                "function txt(e){return ((e&& (e.innerText||e.textContent))||'').replace(/\\s+/g,' ').trim();}" +
-                "var ds=docs(),dhcp=[],wifi=[],generic=[],seenD={},seenW={},seenG={},foundD=false,foundW=false;" +
-                "for(var x=0;x<ds.length;x++){var ts=ds[x].querySelectorAll('table');for(var t=0;t<ts.length;t++){var rs=ts[t].querySelectorAll('tr');if(!rs.length)continue;" +
-                "var head=txt(rs[0]),isD=/host\\s*name/i.test(head)&&/ip\\s*address/i.test(head)&&/mac\\s*address/i.test(head)&&/lease\\s*time/i.test(head),isW=/mac\\s*address/i.test(head)&&/bandwidth/i.test(head);" +
-                "if(!isD&&!isW){for(var h=1;h<Math.min(rs.length,3);h++){var candidate=txt(rs[h]);if(/host\\s*name/i.test(candidate)&&/lease\\s*time/i.test(candidate))isD=true;if(/mac\\s*address/i.test(candidate)&&/bandwidth/i.test(candidate))isW=true;}}" +
-                "if(!isD&&!isW)continue;if(isD)foundD=true;if(isW)foundW=true;var headerIndex=0;for(var hi=0;hi<Math.min(rs.length,3);hi++){var ht=txt(rs[hi]);if((isD&&/host\\s*name/i.test(ht)&&/lease\\s*time/i.test(ht))||(isW&&/mac\\s*address/i.test(ht)&&/bandwidth/i.test(ht))){headerIndex=hi;break;}}" +
-                "for(var r=headerIndex+1;r<rs.length;r++){var cells=Array.prototype.slice.call(rs[r].querySelectorAll('th,td')).map(txt);var raw=cells.join(' | '),m=raw.match(/[0-9a-f]{2}(?:[:-][0-9a-f]{2}){5}/i);if(!m)continue;var mac=m[0].replace(/-/g,':').toUpperCase();" +
-                "if(isD){if(seenD[mac])continue;seenD[mac]=1;var ipm=raw.match(/(?:\\d{1,3}\\.){3}\\d{1,3}/),lease='',name='';for(var z=0;z<cells.length;z++){if(/^\\d{1,2}:\\d{2}:\\d{2}$/.test(cells[z]))lease=cells[z];}for(var z=0;z<cells.length;z++){var c=cells[z];if(!c||c===mac||c===(ipm?ipm[0]:'')||c===lease||/^(no\\.?|host name|ip address|mac address|lease time)$/i.test(c))continue;if(!name)name=c;}dhcp.push({mac:mac,ip:ipm?ipm[0]:'',name:name,lease:lease,raw:raw});}" +
-                "else{if(seenW[mac])continue;seenW[mac]=1;var bw='';for(var z=0;z<cells.length;z++){if(/^\\d{1,3}\\s*M$/i.test(cells[z]))bw=cells[z].toUpperCase();}wifi.push({mac:mac,bandwidth:bw,raw:raw});}" +
-                "}}}" +
-                "if(foundD)TendaBridge.clients(JSON.stringify(dhcp));if(foundW)TendaBridge.wirelessDevices(JSON.stringify(wifi));" +
-                "if(!foundD&&!foundW){for(var x=0;x<ds.length;x++){var ts=ds[x].querySelectorAll('table');for(var t=0;t<ts.length;t++){var rs=ts[t].querySelectorAll('tr');for(var r=0;r<rs.length;r++){var cells=Array.prototype.slice.call(rs[r].querySelectorAll('th,td')).map(txt),raw=cells.join(' | '),m=raw.match(/[0-9a-f]{2}(?:[:-][0-9a-f]{2}){5}/i);if(!m)continue;var mac=m[0].replace(/-/g,':').toUpperCase();if(seenG[mac])continue;seenG[mac]=1;var ipm=raw.match(/(?:\\d{1,3}\\.){3}\\d{1,3}/);generic.push({mac:mac,ip:ipm?ipm[0]:'',name:cells.length?cells[0]:'',raw:raw});}}}TendaBridge.genericDevices(JSON.stringify(generic));}" +
-                "return dhcp.length+wifi.length+generic.length;})()";
-        webView.evaluateJavascript(js, null);
-        status("أحلل الجداول الحالية لتحديد ما إذا كانت DHCP أو Wireless Connection Status...");
+                "var attempt=" + currentAttempt + ";" +
+                "function pathOf(d){try{return new URL(d.location.href).pathname;}catch(e){return '';}}" +
+                "function collectDocs(){var out=[document],seen=[document];for(var i=0;i<out.length;i++){var d=out[i];try{var fs=d.querySelectorAll('frame,iframe');for(var j=0;j<fs.length;j++){try{var child=fs[j].contentDocument;if(child&&child.documentElement&&seen.indexOf(child)<0){seen.push(child);out.push(child);}}catch(e){}}}catch(e){}}return out;}" +
+                "function cellText(e){return ((e&&(e.innerText||e.textContent))||'').replace(/\\u00a0/g,' ').replace(/\\s+/g,' ').trim();}" +
+                "function norm(s){return (s||'').toLowerCase().replace(/\\s+/g,' ').replace(/[.:]/g,' ').trim();}" +
+                "function macValue(s){var m=(s||'').match(/[0-9a-f]{2}(?:[:-][0-9a-f]{2}){5}/i);return m?m[0].replace(/-/g,':').toUpperCase():'';}" +
+                "function idx(headers,needle){for(var i=0;i<headers.length;i++){if(norm(headers[i])===norm(needle)||norm(headers[i]).indexOf(norm(needle))>=0)return i;}return -1;}" +
+                "var docs=collectDocs(),dhcp=[],wifi=[],generic=[],seenD={},seenW={},seenG={},foundD=false,foundW=false,framePaths=[];" +
+                "for(var x=0;x<docs.length;x++){var d=docs[x];framePaths.push(pathOf(d));var tables=d.querySelectorAll('table');" +
+                "for(var t=0;t<tables.length;t++){var table=tables[t],rows=table.querySelectorAll('tr'),headerAt=-1,headers=[],kind='';" +
+                "for(var r=0;r<rows.length;r++){var hc=Array.prototype.slice.call(rows[r].querySelectorAll('th,td')).map(cellText);var hn=hc.map(norm);" +
+                "var hasMac=hn.some(function(v){return v==='mac address'||v.indexOf('mac address')>=0;}),hasIp=hn.some(function(v){return v==='ip address'||v.indexOf('ip address')>=0;}),hasHost=hn.some(function(v){return v==='host name'||v.indexOf('host name')>=0;}),hasLease=hn.some(function(v){return v==='lease time'||v.indexOf('lease time')>=0;}),hasBw=hn.some(function(v){return v==='bandwidth'||v.indexOf('bandwidth')>=0;});" +
+                "if(hasMac&&hasIp&&hasHost&&hasLease){kind='dhcp';headerAt=r;headers=hc;break;}if(hasMac&&hasBw){kind='wifi';headerAt=r;headers=hc;break;}}" +
+                "if(!kind)continue;if(kind==='dhcp')foundD=true;else foundW=true;" +
+                "var macI=idx(headers,'MAC Address'),ipI=idx(headers,'IP Address'),nameI=idx(headers,'Host Name'),leaseI=idx(headers,'Lease Time'),bwI=idx(headers,'Bandwidth');" +
+                "for(var rr=headerAt+1;rr<rows.length;rr++){var row=rows[rr];if(row.querySelector('th'))continue;var cells=Array.prototype.slice.call(row.querySelectorAll('td')).map(cellText);if(!cells.length)continue;var raw=cells.join(' | '),mac=macValue(macI>=0?cells[macI]:raw);if(!mac)continue;" +
+                "if(kind==='dhcp'){if(seenD[mac])continue;seenD[mac]=1;var ip=ipI>=0?(cells[ipI]||''):'';if(!/^\\d{1,3}(?:\\.\\d{1,3}){3}$/.test(ip)){var im=raw.match(/(?:\\d{1,3}\\.){3}\\d{1,3}/);ip=im?im[0]:'';}var nm=nameI>=0?(cells[nameI]||''):'';var lease=leaseI>=0?(cells[leaseI]||''):'';dhcp.push({mac:mac,ip:ip,name:nm,lease:lease,sourcePath:pathOf(d),raw:raw});}" +
+                "else{if(seenW[mac])continue;seenW[mac]=1;var bw=bwI>=0?(cells[bwI]||''):'';if(!bw){for(var z=0;z<cells.length;z++){if(/^\\d{1,3}\\s*M$/i.test(cells[z])){bw=cells[z].toUpperCase();break;}}}wifi.push({mac:mac,bandwidth:bw,sourcePath:pathOf(d),raw:raw});}}}}" +
+                "if(!foundD&&!foundW){for(var x=0;x<docs.length;x++){var ts=docs[x].querySelectorAll('table');for(var t=0;t<ts.length;t++){var rs=ts[t].querySelectorAll('tr');for(var r=0;r<rs.length;r++){var cells=Array.prototype.slice.call(rs[r].querySelectorAll('th,td')).map(cellText),raw=cells.join(' | '),mac=macValue(raw);if(!mac||seenG[mac])continue;seenG[mac]=1;var ipm=raw.match(/(?:\\d{1,3}\\.){3}\\d{1,3}/);generic.push({mac:mac,ip:ipm?ipm[0]:'',name:cells.length?cells[0]:'',raw:raw,sourcePath:pathOf(docs[x])});}}}}" +
+                "var count=dhcp.length+wifi.length+generic.length;" +
+                "if(foundD&&(dhcp.length>0||attempt>=4))TendaBridge.clients(JSON.stringify(dhcp));" +
+                "if(foundW&&(wifi.length>0||attempt>=4))TendaBridge.wirelessDevices(JSON.stringify(wifi));" +
+                "if(!foundD&&!foundW&&(generic.length>0||attempt>=4))TendaBridge.genericDevices(JSON.stringify(generic));" +
+                "if(count>0||attempt>=4)TendaBridge.readResult(dhcp.length,wifi.length,generic.length,foundD,foundW);" +
+                "return count;})()";
+        if (attempt == 0) status("أبحث عن جداول الأجهزة في الصفحة والإطارات الداخلية...");
+        webView.evaluateJavascript(js, result -> {
+            if (result == null || "null".equals(result)) {
+                status("لم تصل نتيجة القراءة من WebView. أعد فتح صفحة DHCP ثم حاول مرة أخرى.");
+                return;
+            }
+            if ("0".equals(result) && currentAttempt < 4) {
+                handler.postDelayed(() -> readDevicesFromPageAttempt(currentAttempt + 1), 650);
+            }
+        });
     }
 
     private void inspectCurrentPage() {
         if (webView.getUrl() == null) return;
         String js = "(function(){" +
-                "function docs(){var a=[document];for(var i=0;i<a.length;i++){try{var fs=a[i].querySelectorAll('frame,iframe');for(var j=0;j<fs.length;j++){try{var d=fs[j].contentDocument;if(d&&a.indexOf(d)<0)a.push(d);}catch(e){}}}catch(e){}}return a;}" +
                 "function pathOnly(u){try{return new URL(u,location.href).pathname;}catch(e){return '';}}" +
+                "function txt(e){return ((e&&(e.innerText||e.textContent))||'').replace(/\\u00a0/g,' ').replace(/\\s+/g,' ').trim();}" +
+                "function docs(){var a=[document],seen=[document];for(var i=0;i<a.length;i++){try{var fs=a[i].querySelectorAll('frame,iframe');for(var j=0;j<fs.length;j++){try{var d=fs[j].contentDocument;if(d&&d.documentElement&&seen.indexOf(d)<0){seen.push(d);a.push(d);}}catch(e){}}}catch(e){}}return a;}" +
                 "var ds=docs(),o={url:pathOnly(location.href),title:document.title,frames:[],links:[],forms:[],tables:[]};" +
-                "for(var x=0;x<ds.length;x++){var d=ds[x];o.frames.push(d.location?pathOnly(d.location.href):'frame');var as=d.querySelectorAll('a');for(var i=0;i<as.length&&o.links.length<120;i++){var a=as[i];var tx=((a.innerText||a.textContent||'')+'').replace(/\\s+/g,' ').trim();if(tx)o.links.push({text:tx,href:pathOnly(a.href||'')});}" +
-                "var fs=d.querySelectorAll('form');for(var f=0;f<fs.length&&o.forms.length<30;f++){var fm=fs[f],ob={action:pathOnly(fm.action||''),method:fm.method||'',fields:[]};var cs=fm.querySelectorAll('input,select,textarea,button');for(var k=0;k<cs.length&&ob.fields.length<100;k++){var c=cs[k],typ=(c.type||'').toLowerCase(),nm=(c.name||'')+' '+(c.id||''),secret=typ==='password'||typ==='hidden'||/(pass|token|cookie|auth|session|key|csrf|stok)/i.test(nm),z={tag:c.tagName.toLowerCase(),type:typ,name:c.name||'',id:c.id||'',value:secret?'[محجوب]':(c.value||''),text:(c.innerText||c.textContent||'').trim()};if(c.tagName==='SELECT'){z.options=[];for(var n=0;n<c.options.length&&n<40;n++)z.options.push({text:c.options[n].text,value:c.options[n].value});}ob.fields.push(z);}o.forms.push(ob);}" +
-                "var ts=d.querySelectorAll('table');for(var t=0;t<ts.length&&o.tables.length<30;t++){var tab=ts[t],headers=[];var hs=tab.querySelectorAll('th');for(var h=0;h<hs.length&&h<20;h++)headers.push((hs[h].innerText||hs[h].textContent||'').replace(/\\s+/g,' ').trim());o.tables.push({headers:headers,rowCount:tab.querySelectorAll('tr').length});}}" +
+                "for(var x=0;x<ds.length;x++){var d=ds[x],framePath='';try{framePath=pathOnly(d.location.href);}catch(e){framePath='frame';}o.frames.push(framePath);" +
+                "var as=d.querySelectorAll('a');for(var i=0;i<as.length&&o.links.length<120;i++){var a=as[i],tx=txt(a);if(tx)o.links.push({text:tx,href:pathOnly(a.href||'')});}" +
+                "var fs=d.querySelectorAll('form');for(var f=0;f<fs.length&&o.forms.length<30;f++){var fm=fs[f],ob={frame:framePath,action:pathOnly(fm.action||''),method:fm.method||'',onSubmit:(fm.getAttribute('onsubmit')||'').slice(0,300),fields:[]},cs=fm.querySelectorAll('input,select,textarea,button');for(var k=0;k<cs.length&&ob.fields.length<100;k++){var c=cs[k],typ=(c.type||'').toLowerCase(),nm=(c.name||'')+' '+(c.id||''),secret=typ==='password'||typ==='hidden'||/(pass|token|cookie|auth|session|key|csrf|stok)/i.test(nm),z={tag:c.tagName.toLowerCase(),type:typ,name:c.name||'',id:c.id||'',value:secret?'[محجوب]':(c.value||''),text:txt(c),onClick:(c.getAttribute('onclick')||'').slice(0,300)};if(c.tagName==='SELECT'){z.options=[];for(var n=0;n<c.options.length&&n<40;n++)z.options.push({text:c.options[n].text,value:c.options[n].value});}ob.fields.push(z);}o.forms.push(ob);}" +
+                "var ts=d.querySelectorAll('table');for(var t=0;t<ts.length&&o.tables.length<40;t++){var tab=ts[t],rs=tab.querySelectorAll('tr'),headers=[],headerAt=-1,preview=[];for(var r=0;r<rs.length;r++){var cc=Array.prototype.slice.call(rs[r].querySelectorAll('th,td')).map(txt);var joined=cc.join(' ').toLowerCase();if((joined.indexOf('host name')>=0&&joined.indexOf('lease time')>=0)||(joined.indexOf('mac address')>=0&&joined.indexOf('bandwidth')>=0)){headers=cc;headerAt=r;break;}}if(headerAt<0){var hs=tab.querySelectorAll('th');for(var h=0;h<hs.length&&h<20;h++)headers.push(txt(hs[h]));}if(headerAt>=0){for(var pr=headerAt+1;pr<rs.length&&preview.length<5;pr++){var vals=Array.prototype.slice.call(rs[pr].querySelectorAll('td')).map(txt);if(vals.length)preview.push(vals);}}o.tables.push({frame:framePath,headers:headers,rowCount:rs.length,previewRows:preview});}}" +
                 "TendaBridge.diagnostic(JSON.stringify(o));return 'ok';})()";
         webView.evaluateJavascript(js, null);
     }
@@ -337,6 +434,7 @@ public class MainActivity extends Activity {
                 wirelessSnapshot.put(mac, item);
             }
             hasWirelessSnapshot = true;
+            wirelessSnapshotAt = System.currentTimeMillis();
             renderCombinedDevices();
             status("تم تحديث قائمة Wi-Fi: " + wirelessSnapshot.size() + " جهازاً ظاهراً في صفحة Wireless Connection Status.");
         } catch (JSONException e) {
@@ -356,6 +454,7 @@ public class MainActivity extends Activity {
                 dhcpSnapshot.put(mac, item);
             }
             hasDhcpSnapshot = true;
+            dhcpSnapshotAt = System.currentTimeMillis();
             renderCombinedDevices();
             status("تم تحديث قائمة DHCP: " + dhcpSnapshot.size() + " سجلاً.");
         } catch (JSONException e) {
@@ -369,8 +468,13 @@ public class MainActivity extends Activity {
         try {
             JSONArray arr = new JSONArray(json);
             StringBuilder b = new StringBuilder();
-            b.append("عُثر على ").append(arr.length()).append(" سجلاً يحتوي على MAC، لكن نوع الجدول غير معروف.\n");
-            b.append("لم نصنّف هذه السجلات كأجهزة DHCP أو كأجهزة متصلة. افتح إحدى الصفحتين المدعومتين ثم أعد القراءة.\n\n");
+            if (arr.length() == 0) {
+                b.append("لم أتعرف على جدول أجهزة في الصفحة الحالية.\n");
+                b.append("افتح DHCP Client List أو Wireless Connection Status من قائمة الراوتر ثم أعد القراءة.\n\n");
+            } else {
+                b.append("عُثر على ").append(arr.length()).append(" سجلاً يحتوي على MAC، لكن نوع الجدول غير معروف.\n");
+                b.append("لم نصنّف هذه السجلات كأجهزة DHCP أو كأجهزة متصلة. افتح إحدى الصفحتين المدعومتين ثم أعد القراءة.\n\n");
+            }
             for (int i = 0; i < arr.length(); i++) {
                 JSONObject item = arr.optJSONObject(i);
                 if (item == null) continue;
@@ -390,6 +494,7 @@ public class MainActivity extends Activity {
         if (macs.isEmpty()) {
             lastDevices = "لم يتم العثور على أجهزة. افتح DHCP Client List أو Wireless Connection Status ثم اضغط قراءة الأجهزة.";
             devicesView.setText(lastDevices);
+            if (deviceCards != null) deviceCards.removeAllViews();
             return;
         }
 
@@ -403,6 +508,8 @@ public class MainActivity extends Activity {
         b.append("إجمالي عناوين MAC الفريدة: ").append(macs.size()).append("\n");
         b.append("سجلات DHCP: ").append(hasDhcpSnapshot ? dhcpSnapshot.size() : "لم تُقرأ بعد").append("\n");
         b.append("أجهزة Wi-Fi الظاهرة: ").append(hasWirelessSnapshot ? wirelessSnapshot.size() : "لم تُقرأ بعد").append("\n");
+        if (hasDhcpSnapshot) b.append("آخر قراءة DHCP: ").append(formatTime(dhcpSnapshotAt)).append("\n");
+        if (hasWirelessSnapshot) b.append("آخر قراءة Wi-Fi: ").append(formatTime(wirelessSnapshotAt)).append("\n");
         if (hasDhcpSnapshot && hasWirelessSnapshot) {
             b.append("موجودة في القائمتين: ").append(both)
                     .append(" | Wi-Fi فقط: ").append(wifiOnly)
@@ -428,6 +535,84 @@ public class MainActivity extends Activity {
         }
         lastDevices = b.toString();
         devicesView.setText(lastDevices);
+        renderDeviceCards(macs);
+    }
+
+    private String formatTime(long time) {
+        if (time <= 0L) return "غير متاح";
+        return new SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(new Date(time));
+    }
+
+    private String displayName(String mac, JSONObject dhcp) {
+        String custom = preferences.getString("device_name_" + mac, "").trim();
+        if (!custom.isEmpty()) return custom;
+        String routerName = dhcp == null ? "" : dhcp.optString("name", "").trim();
+        return routerName.isEmpty() ? "جهاز غير مسمى" : routerName;
+    }
+
+    private void renderDeviceCards(Set<String> macs) {
+        if (deviceCards == null) return;
+        deviceCards.removeAllViews();
+        for (String mac : macs) {
+            JSONObject d = dhcpSnapshot.get(mac);
+            JSONObject w = wirelessSnapshot.get(mac);
+            String name = displayName(mac, d);
+            String ip = d == null ? "غير متاح" : d.optString("ip", "غير متاح");
+            String lease = d == null ? "" : d.optString("lease", "");
+            String bandwidth = w == null ? "" : w.optString("bandwidth", "");
+            String wifiState = !hasWirelessSnapshot ? "لم تُفحص قائمة Wi-Fi" :
+                    (w != null ? "ظاهر في آخر قائمة Wi-Fi" : "غير ظاهر في آخر قائمة Wi-Fi");
+
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.VERTICAL);
+            row.setPadding(dp(10), dp(9), dp(10), dp(9));
+            android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+            bg.setColor(Color.rgb(250, 251, 252));
+            bg.setCornerRadius(dp(9));
+            bg.setStroke(dp(1), BORDER);
+            row.setBackground(bg);
+            TextView heading = text(name, 15, true, DARK);
+            row.addView(heading, matchWrap());
+            TextView details = text("IP: " + ip + "\nMAC: " + mac + "\nالحالة: " + wifiState +
+                    (bandwidth.isEmpty() ? "" : "\nعرض قناة Wi-Fi: " + bandwidth) +
+                    (lease.isEmpty() ? "" : "\nLease Time: " + lease), 12, false, MUTED);
+            details.setTextDirection(View.TEXT_DIRECTION_LTR);
+            row.addView(details, matchWrap());
+            LinearLayout actions = new LinearLayout(this);
+            actions.setOrientation(LinearLayout.HORIZONTAL);
+            Button rename = button("تغيير الاسم", false);
+            rename.setOnClickListener(v -> promptRename(mac, displayName(mac, dhcpSnapshot.get(mac))));
+            Button copyMac = button("نسخ MAC", false);
+            copyMac.setOnClickListener(v -> {
+                ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                cm.setPrimaryClip(ClipData.newPlainText("MAC", mac));
+                toast("تم نسخ عنوان MAC.");
+            });
+            actions.addView(rename, new LinearLayout.LayoutParams(0, -2, 1));
+            actions.addView(copyMac, new LinearLayout.LayoutParams(0, -2, 1));
+            row.addView(actions, matchWrap());
+            deviceCards.addView(row, matchWrap());
+            gap(deviceCards, 6);
+        }
+    }
+
+    private void promptRename(String mac, String currentName) {
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setText(currentName.equals("جهاز غير مسمى") ? "" : currentName);
+        input.setHint("مثال: هاتف أحمد");
+        new AlertDialog.Builder(this)
+                .setTitle("تسمية الجهاز")
+                .setMessage(mac)
+                .setView(input)
+                .setNegativeButton("إلغاء", null)
+                .setPositiveButton("حفظ", (dialog, which) -> {
+                    String value = input.getText().toString().trim();
+                    if (value.isEmpty()) preferences.edit().remove("device_name_" + mac).apply();
+                    else preferences.edit().putString("device_name_" + mac, value).apply();
+                    renderCombinedDevices();
+                    toast("تم حفظ اسم الجهاز على الهاتف.");
+                }).show();
     }
 
     private void renderDiagnostic(String json) {
@@ -465,6 +650,19 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void diagnostic(String json) {
             runOnUiThread(() -> renderDiagnostic(json));
+        }
+
+        @JavascriptInterface
+        public void readResult(int dhcpCount, int wifiCount, int genericCount, boolean foundDhcp, boolean foundWifi) {
+            runOnUiThread(() -> {
+                if (foundDhcp || foundWifi) {
+                    status("اكتملت القراءة: DHCP=" + dhcpCount + "، Wi-Fi=" + wifiCount + ".");
+                } else if (genericCount > 0) {
+                    status("وجدت سجلات غير مصنفة. أرسل تقرير التشخيص.");
+                } else {
+                    status("لم أجد جدول أجهزة معروفاً. افتح DHCP Client List أو Wireless Connection Status.");
+                }
+            });
         }
 
         @JavascriptInterface
