@@ -13,6 +13,8 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
+import android.text.Editable;
+import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.webkit.CookieManager;
@@ -62,7 +64,13 @@ public class MainActivity extends Activity {
     private TextView pageView;
     private TextView devicesView;
     private TextView diagnosticView;
+    private TextView scanMetaView;
+    private EditText searchDevices;
+    private Button scanAllButton;
     private LinearLayout deviceCards;
+    private String filterMode = "all";
+    private boolean scanInProgress = false;
+    private Runnable pendingReadCompletion;
     private SharedPreferences preferences;
     private String activeHost = DEFAULT_ROUTER;
     private String lastDiagnostic = "";
@@ -168,27 +176,62 @@ public class MainActivity extends Activity {
 
         gap(root, 10);
         LinearLayout tools = card(root);
-        tools.addView(text("قراءة وتشخيص", 15, true, DARK), matchWrap());
-        Button read = button("قراءة الأجهزة من الصفحة الحالية", false);
-        read.setOnClickListener(v -> readDevicesFromPage());
-        tools.addView(read, matchWrap());
-        Button inspect = button("فحص حقول الصفحة الحالية", false);
-        inspect.setOnClickListener(v -> inspectCurrentPage());
-        tools.addView(inspect, matchWrap());
-        Button copy = button("نسخ تقرير التشخيص", false);
-        copy.setOnClickListener(v -> copyDiagnostic());
-        tools.addView(copy, matchWrap());
-        devicesView = text("افتح DHCP Client List ثم Wireless Connection Status. سيحاول التطبيق قراءة الجدول تلقائياً عند تحميل الصفحة، ويمكنك الضغط على زر القراءة عند الحاجة.", 12, false, DARK);
-        devicesView.setTextIsSelectable(true);
+        tools.addView(text("إدارة المشتركين", 17, true, DARK), matchWrap());
+        scanAllButton = button("تحديث القائمتين تلقائياً", true);
+        scanAllButton.setOnClickListener(v -> refreshBothLists());
+        tools.addView(scanAllButton, matchWrap());
+        scanMetaView = text("لم يبدأ الفحص بعد. اتصل بالراوتر ثم حدّث القائمتين.", 12, false, MUTED);
+        tools.addView(scanMetaView, matchWrap());
+        devicesView = text("لا توجد بيانات بعد. اضغط تحديث القائمتين.", 13, true, DARK);
+        devicesView.setPadding(0, dp(8), 0, dp(8));
         tools.addView(devicesView, matchWrap());
+
+        searchDevices = new EditText(this);
+        searchDevices.setSingleLine(true);
+        searchDevices.setTextSize(14);
+        searchDevices.setHint("ابحث بالاسم أو IP أو MAC");
+        searchDevices.setInputType(InputType.TYPE_CLASS_TEXT);
+        searchDevices.setPadding(dp(10), dp(7), dp(10), dp(7));
+        tools.addView(searchDevices, new LinearLayout.LayoutParams(-1, dp(46)));
+        searchDevices.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) { renderDeviceCards(currentMacs()); }
+            @Override public void afterTextChanged(Editable e) { }
+        });
+
+        LinearLayout filters = new LinearLayout(this);
+        filters.setOrientation(LinearLayout.HORIZONTAL);
+        Button allFilter = button("الكل", false);
+        Button wifiFilter = button("ظاهر في Wi-Fi", false);
+        Button dhcpFilter = button("DHCP فقط", false);
+        allFilter.setOnClickListener(v -> { filterMode = "all"; renderDeviceCards(currentMacs()); });
+        wifiFilter.setOnClickListener(v -> { filterMode = "wifi"; renderDeviceCards(currentMacs()); });
+        dhcpFilter.setOnClickListener(v -> { filterMode = "dhcp"; renderDeviceCards(currentMacs()); });
+        filters.addView(allFilter, new LinearLayout.LayoutParams(0, -2, 1));
+        filters.addView(wifiFilter, new LinearLayout.LayoutParams(0, -2, 1));
+        filters.addView(dhcpFilter, new LinearLayout.LayoutParams(0, -2, 1));
+        tools.addView(filters, matchWrap());
+
         deviceCards = new LinearLayout(this);
         deviceCards.setOrientation(LinearLayout.VERTICAL);
         tools.addView(deviceCards, matchWrap());
+
+        LinearLayout diagnostics = card(root);
+        diagnostics.addView(text("أدوات التشخيص", 15, true, DARK), matchWrap());
+        Button read = button("قراءة الأجهزة من الصفحة الحالية", false);
+        read.setOnClickListener(v -> readDevicesFromPage());
+        diagnostics.addView(read, matchWrap());
+        Button inspect = button("فحص حقول الصفحة الحالية", false);
+        inspect.setOnClickListener(v -> inspectCurrentPage());
+        diagnostics.addView(inspect, matchWrap());
+        Button copy = button("نسخ تقرير التشخيص", false);
+        copy.setOnClickListener(v -> copyDiagnostic());
+        diagnostics.addView(copy, matchWrap());
         diagnosticView = text("تقرير الصفحة: لم يتم الفحص بعد.", 11, false, MUTED);
         diagnosticView.setTextIsSelectable(true);
-        tools.addView(diagnosticView, matchWrap());
+        diagnostics.addView(diagnosticView, matchWrap());
 
-        TextView footer = text("الإصدار 0.2.2: قراءة جداول DHCP وWi-Fi من الإطارات الداخلية مع مطابقة أعمدة الجدول وإعادة المحاولة عند تأخر تحميل الإطار. لا ينفذ الحظر أو تحديد السرعة حتى نتحقق من نماذج الراوتر الفعلية.", 12, true, MUTED);
+        TextView footer = text("الإصدار 0.2.3: لوحة مشتركين، بحث وتصفية، وتحديث متتابع لقائمتي DHCP وWi-Fi. الحظر وتحديد السرعة غير مفعّلين بعد حتى نتحقق من نماذج الكتابة في الراوتر.", 12, true, MUTED);
         footer.setPadding(dp(4), dp(12), dp(4), dp(4));
         root.addView(footer, matchWrap());
 
@@ -339,7 +382,84 @@ public class MainActivity extends Activity {
         webView.evaluateJavascript(script, result -> callback.onResult("true".equals(result)));
     }
 
+    /**
+     * Read both router tables in sequence using the router's own navigation.
+     * The operation is read-only: it only opens the two list pages and parses them.
+     */
+    private void refreshBothLists() {
+        if (webView == null || webView.getUrl() == null) {
+            toast("اتصل بالراوتر وسجّل الدخول أولاً.");
+            return;
+        }
+        if (scanInProgress) {
+            toast("الفحص جارٍ بالفعل، انتظر اكتماله.");
+            return;
+        }
+        scanInProgress = true;
+        if (scanAllButton != null) scanAllButton.setEnabled(false);
+        if (scanMetaView != null) scanMetaView.setText("المرحلة 1 من 2: فتح قائمة DHCP...");
+        status("بدأ تحديث القائمتين. لن يتم تغيير أي إعداد في الراوتر.");
+        clickRouterLabel("Advanced", advancedFound -> {
+            if (!advancedFound) {
+                finishFullScan(false, "لم أجد تبويب Advanced. افتحه يدوياً ثم أعد الفحص.");
+                return;
+            }
+            handler.postDelayed(() -> clickRouterLabel("DHCP Client List", found -> {
+                if (!found) {
+                    finishFullScan(false, "فُتح Advanced، لكن لم أجد رابط DHCP Client List.");
+                    return;
+                }
+                handler.postDelayed(() -> readDevicesFromPage(() -> {
+                    if (scanMetaView != null) scanMetaView.setText("اكتملت قراءة DHCP. المرحلة 2 من 2: فتح قائمة Wi-Fi...");
+                    handler.postDelayed(this::scanWirelessStage, 650);
+                }), 1100);
+            }), 1200);
+        });
+    }
+
+    private void scanWirelessStage() {
+        clickRouterLabel("Wireless", found -> {
+            if (!found) {
+                finishFullScan(false, "قُرئت DHCP، لكن لم أجد تبويب Wireless. افتح Wireless Connection Status يدوياً.");
+                return;
+            }
+            handler.postDelayed(() -> clickRouterLabel("Wireless Connection Status", childFound -> {
+                if (!childFound) {
+                    finishFullScan(false, "قُرئت DHCP، لكن لم أجد Wireless Connection Status.");
+                    return;
+                }
+                handler.postDelayed(() -> readDevicesFromPage(() -> {
+                    boolean complete = hasDhcpSnapshot && hasWirelessSnapshot;
+                    finishFullScan(complete, complete
+                            ? "اكتملت قراءة DHCP وWi-Fi ودمج الأجهزة بنجاح."
+                            : "انتهت المحاولة، لكن إحدى القائمتين لم تُقرأ. راجع آخر النتائج أو افتح الصفحة يدوياً.");
+                }), 1100);
+            }), 1200);
+        });
+    }
+
+    private void finishFullScan(boolean success, String message) {
+        scanInProgress = false;
+        if (scanAllButton != null) scanAllButton.setEnabled(true);
+        if (scanMetaView != null) scanMetaView.setText(message + "\nآخر قراءة DHCP: " +
+                (hasDhcpSnapshot ? formatTime(dhcpSnapshotAt) : "غير متاحة") +
+                " | آخر قراءة Wi-Fi: " + (hasWirelessSnapshot ? formatTime(wirelessSnapshotAt) : "غير متاحة"));
+        status(message);
+        if (success) toast("تم تحديث قائمتي المشتركين بنجاح.");
+    }
+
+    private void finishPendingRead() {
+        Runnable callback = pendingReadCompletion;
+        pendingReadCompletion = null;
+        if (callback != null) callback.run();
+    }
+
     private void readDevicesFromPage() {
+        readDevicesFromPage(null);
+    }
+
+    private void readDevicesFromPage(Runnable completion) {
+        if (completion != null) pendingReadCompletion = completion;
         readDevicesFromPageAttempt(0);
     }
 
@@ -351,6 +471,7 @@ public class MainActivity extends Activity {
     private void readDevicesFromPageAttempt(int attempt) {
         if (webView == null || webView.getUrl() == null) {
             toast("اتصل بالراوتر وسجّل الدخول أولاً.");
+            finishPendingRead();
             return;
         }
         final int currentAttempt = attempt;
@@ -384,6 +505,7 @@ public class MainActivity extends Activity {
         webView.evaluateJavascript(js, result -> {
             if (result == null || "null".equals(result)) {
                 status("لم تصل نتيجة القراءة من WebView. أعد فتح صفحة DHCP ثم حاول مرة أخرى.");
+                finishPendingRead();
                 return;
             }
             if ("0".equals(result) && currentAttempt < 4) {
@@ -487,13 +609,18 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void renderCombinedDevices() {
+    private Set<String> currentMacs() {
         Set<String> macs = new LinkedHashSet<>();
         macs.addAll(dhcpSnapshot.keySet());
         macs.addAll(wirelessSnapshot.keySet());
+        return macs;
+    }
+
+    private void renderCombinedDevices() {
+        Set<String> macs = currentMacs();
         if (macs.isEmpty()) {
             lastDevices = "لم يتم العثور على أجهزة. افتح DHCP Client List أو Wireless Connection Status ثم اضغط قراءة الأجهزة.";
-            devicesView.setText(lastDevices);
+            if (devicesView != null) devicesView.setText(lastDevices);
             if (deviceCards != null) deviceCards.removeAllViews();
             return;
         }
@@ -504,37 +631,27 @@ public class MainActivity extends Activity {
             if (inD && inW) both++; else if (inW) wifiOnly++; else dhcpOnly++;
         }
 
-        StringBuilder b = new StringBuilder();
-        b.append("إجمالي عناوين MAC الفريدة: ").append(macs.size()).append("\n");
-        b.append("سجلات DHCP: ").append(hasDhcpSnapshot ? dhcpSnapshot.size() : "لم تُقرأ بعد").append("\n");
-        b.append("أجهزة Wi-Fi الظاهرة: ").append(hasWirelessSnapshot ? wirelessSnapshot.size() : "لم تُقرأ بعد").append("\n");
-        if (hasDhcpSnapshot) b.append("آخر قراءة DHCP: ").append(formatTime(dhcpSnapshotAt)).append("\n");
-        if (hasWirelessSnapshot) b.append("آخر قراءة Wi-Fi: ").append(formatTime(wirelessSnapshotAt)).append("\n");
+        StringBuilder summary = new StringBuilder();
+        summary.append("إجمالي الأجهزة الفريدة: ").append(macs.size()).append("\n");
+        summary.append("DHCP: ").append(hasDhcpSnapshot ? dhcpSnapshot.size() : "لم تُقرأ");
+        summary.append("  |  Wi-Fi: ").append(hasWirelessSnapshot ? wirelessSnapshot.size() : "لم تُقرأ").append("\n");
         if (hasDhcpSnapshot && hasWirelessSnapshot) {
-            b.append("موجودة في القائمتين: ").append(both)
-                    .append(" | Wi-Fi فقط: ").append(wifiOnly)
-                    .append(" | DHCP فقط: ").append(dhcpOnly).append("\n");
+            summary.append("في القائمتين: ").append(both)
+                    .append("  |  Wi-Fi فقط: ").append(wifiOnly)
+                    .append("  |  DHCP فقط: ").append(dhcpOnly);
         }
-        b.append("\nملاحظة: ظهور الجهاز في قائمة Wi-Fi هو مؤشر الاتصال اللاسلكي وقت تحديث الصفحة. قيمة 20M أو 40M هي عرض قناة Wi-Fi وليست سرعة الإنترنت أو معدل التنزيل.\n\n");
+        if (devicesView != null) devicesView.setText(summary.toString());
 
-        int index = 1;
+        StringBuilder report = new StringBuilder(summary).append("\n");
         for (String mac : macs) {
             JSONObject d = dhcpSnapshot.get(mac);
             JSONObject w = wirelessSnapshot.get(mac);
-            String name = d == null ? "" : d.optString("name", "").trim();
-            String ip = d == null ? "" : d.optString("ip", "").trim();
-            String lease = d == null ? "" : d.optString("lease", "").trim();
-            String bandwidth = w == null ? "" : w.optString("bandwidth", "").trim();
-            b.append(index++).append(". ").append(name.isEmpty() ? "جهاز غير مسمى" : name).append("\n");
-            b.append("   IP: ").append(ip.isEmpty() ? "غير متاح في لقطة DHCP" : ip).append("\n");
-            b.append("   MAC: ").append(mac).append("\n");
-            b.append("   حالة Wi-Fi: ").append(w != null ? "ظاهر كمتصل" : (hasWirelessSnapshot ? "غير ظاهر في آخر لقطة Wi-Fi" : "لم تُفحص بعد")).append("\n");
-            if (!bandwidth.isEmpty()) b.append("   عرض قناة Wi-Fi: ").append(bandwidth).append("\n");
-            if (!lease.isEmpty()) b.append("   Lease Time: ").append(lease).append("\n");
-            b.append("\n");
+            report.append(displayName(mac, d)).append(" | ").append(mac)
+                    .append(" | IP: ").append(d == null ? "غير متاح" : d.optString("ip", ""))
+                    .append(" | Wi-Fi: ").append(w == null ? "غير ظاهر في آخر لقطة" : "ظاهر")
+                    .append("\n");
         }
-        lastDevices = b.toString();
-        devicesView.setText(lastDevices);
+        lastDevices = report.toString();
         renderDeviceCards(macs);
     }
 
@@ -553,6 +670,8 @@ public class MainActivity extends Activity {
     private void renderDeviceCards(Set<String> macs) {
         if (deviceCards == null) return;
         deviceCards.removeAllViews();
+        String query = searchDevices == null ? "" : searchDevices.getText().toString().trim().toLowerCase(Locale.ROOT);
+        int shown = 0;
         for (String mac : macs) {
             JSONObject d = dhcpSnapshot.get(mac);
             JSONObject w = wirelessSnapshot.get(mac);
@@ -560,24 +679,43 @@ public class MainActivity extends Activity {
             String ip = d == null ? "غير متاح" : d.optString("ip", "غير متاح");
             String lease = d == null ? "" : d.optString("lease", "");
             String bandwidth = w == null ? "" : w.optString("bandwidth", "");
-            String wifiState = !hasWirelessSnapshot ? "لم تُفحص قائمة Wi-Fi" :
-                    (w != null ? "ظاهر في آخر قائمة Wi-Fi" : "غير ظاهر في آخر قائمة Wi-Fi");
+            boolean wifiSeen = w != null;
+            if ("wifi".equals(filterMode) && !wifiSeen) continue;
+            if ("dhcp".equals(filterMode) && (d == null || wifiSeen)) continue;
+            String searchable = (name + " " + mac + " " + ip).toLowerCase(Locale.ROOT);
+            if (!query.isEmpty() && !searchable.contains(query)) continue;
+            shown++;
 
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.VERTICAL);
-            row.setPadding(dp(10), dp(9), dp(10), dp(9));
+            row.setPadding(dp(12), dp(11), dp(12), dp(11));
             android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
-            bg.setColor(Color.rgb(250, 251, 252));
-            bg.setCornerRadius(dp(9));
+            bg.setColor(Color.WHITE);
+            bg.setCornerRadius(dp(11));
             bg.setStroke(dp(1), BORDER);
             row.setBackground(bg);
-            TextView heading = text(name, 15, true, DARK);
-            row.addView(heading, matchWrap());
-            TextView details = text("IP: " + ip + "\nMAC: " + mac + "\nالحالة: " + wifiState +
-                    (bandwidth.isEmpty() ? "" : "\nعرض قناة Wi-Fi: " + bandwidth) +
-                    (lease.isEmpty() ? "" : "\nLease Time: " + lease), 12, false, MUTED);
-            details.setTextDirection(View.TEXT_DIRECTION_LTR);
+
+            LinearLayout header = new LinearLayout(this);
+            header.setOrientation(LinearLayout.HORIZONTAL);
+            header.setGravity(Gravity.CENTER_VERTICAL);
+            TextView heading = text(name, 16, true, DARK);
+            heading.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+            header.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
+            TextView state = text(wifiSeen ? "متصل عبر Wi-Fi" : (d != null ? "DHCP فقط" : "Wi-Fi فقط"), 11, true,
+                    wifiSeen ? Color.rgb(22, 128, 70) : Color.rgb(160, 105, 0));
+            state.setGravity(Gravity.CENTER);
+            header.addView(state, new LinearLayout.LayoutParams(-2, -2));
+            row.addView(header, matchWrap());
+
+            StringBuilder detail = new StringBuilder();
+            detail.append("IP: ").append(ip).append("\nMAC: ").append(mac);
+            if (!bandwidth.isEmpty()) detail.append("\nعرض قناة Wi-Fi: ").append(bandwidth);
+            if (!lease.isEmpty()) detail.append("\nLease Time: ").append(lease);
+            if (!wifiSeen && d != null && hasWirelessSnapshot) detail.append("\nملاحظة: لم يظهر في آخر لقطة Wi-Fi؛ لا يعني ذلك بالضرورة أنه غير متصل بالشبكة عبر LAN.");
+            TextView details = text(detail.toString(), 12, false, MUTED);
+            details.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG);
             row.addView(details, matchWrap());
+
             LinearLayout actions = new LinearLayout(this);
             actions.setOrientation(LinearLayout.HORIZONTAL);
             Button rename = button("تغيير الاسم", false);
@@ -588,12 +726,37 @@ public class MainActivity extends Activity {
                 cm.setPrimaryClip(ClipData.newPlainText("MAC", mac));
                 toast("تم نسخ عنوان MAC.");
             });
+            Button more = button("تفاصيل", false);
+            more.setOnClickListener(v -> showDeviceDetails(mac));
             actions.addView(rename, new LinearLayout.LayoutParams(0, -2, 1));
             actions.addView(copyMac, new LinearLayout.LayoutParams(0, -2, 1));
+            actions.addView(more, new LinearLayout.LayoutParams(0, -2, 1));
             row.addView(actions, matchWrap());
             deviceCards.addView(row, matchWrap());
-            gap(deviceCards, 6);
+            gap(deviceCards, 7);
         }
+        if (shown == 0) {
+            TextView empty = text("لا توجد أجهزة مطابقة للبحث أو عامل التصفية.", 13, false, MUTED);
+            empty.setGravity(Gravity.CENTER);
+            deviceCards.addView(empty, matchWrap());
+        }
+    }
+
+    private void showDeviceDetails(String mac) {
+        JSONObject d = dhcpSnapshot.get(mac);
+        JSONObject w = wirelessSnapshot.get(mac);
+        StringBuilder details = new StringBuilder();
+        details.append("الاسم: ").append(displayName(mac, d)).append("\n");
+        details.append("MAC: ").append(mac).append("\n");
+        details.append("IP: ").append(d == null ? "غير متاح" : d.optString("ip", "غير متاح")).append("\n");
+        details.append("DHCP: ").append(d == null ? "غير موجود في آخر لقطة" : "موجود في آخر لقطة").append("\n");
+        details.append("Wi-Fi: ").append(w == null ? "غير ظاهر في آخر لقطة" : "ظاهر في آخر لقطة").append("\n");
+        if (d != null) details.append("Lease Time: ").append(d.optString("lease", "غير متاح")).append("\n");
+        if (w != null) details.append("عرض قناة Wi-Fi: ").append(w.optString("bandwidth", "غير متاح")).append("\n");
+        details.append("آخر تحديث DHCP: ").append(hasDhcpSnapshot ? formatTime(dhcpSnapshotAt) : "غير متاح").append("\n");
+        details.append("آخر تحديث Wi-Fi: ").append(hasWirelessSnapshot ? formatTime(wirelessSnapshotAt) : "غير متاح");
+        new AlertDialog.Builder(this).setTitle("تفاصيل المشترك").setMessage(details.toString())
+                .setPositiveButton("إغلاق", null).show();
     }
 
     private void promptRename(String mac, String currentName) {
@@ -662,6 +825,7 @@ public class MainActivity extends Activity {
                 } else {
                     status("لم أجد جدول أجهزة معروفاً. افتح DHCP Client List أو Wireless Connection Status.");
                 }
+                finishPendingRead();
             });
         }
 
