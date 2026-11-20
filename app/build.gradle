@@ -10,8 +10,8 @@ android {
         applicationId 'com.tenda.w303guard'
         minSdk 23
         targetSdk 28
-        versionCode 7
-        versionName '0.2.5-traffic-statistics'
+        versionCode 8
+        versionName '0.2.6-live-monitor'
     }
 
     compileOptions {

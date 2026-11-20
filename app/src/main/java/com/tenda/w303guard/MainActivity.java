@@ -51,6 +51,10 @@ import java.util.LinkedHashSet;
  * exact V5.07.46_en form fields and write semantics have been verified.
  */
 public class MainActivity extends Activity {
+    private interface TrafficReadCallback {
+        void onComplete(boolean found);
+    }
+
     private static final String DEFAULT_ROUTER = "192.168.0.1";
     private static final int ORANGE = Color.rgb(232, 117, 0);
     private static final int DARK = Color.rgb(31, 41, 55);
@@ -58,6 +62,7 @@ public class MainActivity extends Activity {
     private static final int BORDER = Color.rgb(224, 228, 233);
 
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private ScrollView mainScrollView;
     private EditText routerIp;
     private WebView webView;
     private TextView statusView;
@@ -84,6 +89,19 @@ public class MainActivity extends Activity {
     private String trafficSourcePath = "";
     private TextView trafficSummaryView;
     private LinearLayout trafficCards;
+    private TextView liveStatusView;
+    private Button liveStartButton;
+    private Button liveStopButton;
+    private Button liveIntervalButton;
+    private boolean liveMonitorRunning = false;
+    private boolean liveCycleBusy = false;
+    private boolean liveLifecyclePaused = false;
+    private int liveConsecutiveMisses = 0;
+    private long liveCycleStartedAt = 0L;
+    private int livePollIntervalMs = 3000;
+    private final int[] livePollIntervalsMs = new int[]{3000, 5000, 10000};
+    private int livePollIntervalIndex = 0;
+    private final Runnable liveMonitorRunnable = this::runLiveMonitorCycle;
     private boolean hasDhcpSnapshot = false;
     private boolean hasWirelessSnapshot = false;
     private long dhcpSnapshotAt = 0L;
@@ -99,6 +117,7 @@ public class MainActivity extends Activity {
 
     private void buildUi() {
         ScrollView outer = new ScrollView(this);
+        mainScrollView = outer;
         outer.setFillViewport(true);
         outer.setBackgroundColor(Color.rgb(247, 248, 250));
         outer.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
@@ -145,6 +164,57 @@ public class MainActivity extends Activity {
         });
 
         gap(root, 10);
+        LinearLayout trafficCard = card(root);
+        trafficCard.addView(text("المراقبة اللحظية للمشتركين - Traffic Statistics", 18, true, DARK), matchWrap());
+        trafficCard.addView(text("الأولوية هنا لسرعة الرفع والتنزيل الحالية لكل مشترك. يقوم التطبيق بتحديث إطار Traffic Statistics داخل الراوتر تلقائياً ثم يعيد قراءة الجدول.", 12, false, MUTED), matchWrap());
+
+        liveStatusView = text("المراقبة متوقفة. افتح QoS ثم Traffic Statistics واضغط بدء المراقبة الحية.", 12, true, MUTED);
+        liveStatusView.setPadding(0, dp(7), 0, dp(7));
+        trafficCard.addView(liveStatusView, matchWrap());
+
+        Button openTrafficPage = button("فتح QoS ثم Traffic Statistics", false);
+        openTrafficPage.setOnClickListener(v -> openRouterSection("QoS", "Traffic Statistics"));
+        trafficCard.addView(openTrafficPage, matchWrap());
+
+        LinearLayout liveControls = new LinearLayout(this);
+        liveControls.setOrientation(LinearLayout.HORIZONTAL);
+        liveStartButton = button("بدء المراقبة الحية", true);
+        liveStartButton.setOnClickListener(v -> startLiveMonitoring());
+        liveStopButton = button("إيقاف", false);
+        liveStopButton.setEnabled(false);
+        liveStopButton.setOnClickListener(v -> stopLiveMonitoring("أوقفت المراقبة الحية يدوياً."));
+        liveControls.addView(liveStartButton, new LinearLayout.LayoutParams(0, -2, 2));
+        liveControls.addView(liveStopButton, new LinearLayout.LayoutParams(0, -2, 1));
+        trafficCard.addView(liveControls, matchWrap());
+
+        liveIntervalButton = button("فاصل التحديث: 3 ثوانٍ", false);
+        liveIntervalButton.setOnClickListener(v -> cycleLivePollInterval());
+        trafficCard.addView(liveIntervalButton, matchWrap());
+
+        Button refreshTrafficNow = button("تحديث السرعات الآن", false);
+        refreshTrafficNow.setOnClickListener(v -> refreshTrafficFrameThenRead(true, null));
+        trafficCard.addView(refreshTrafficNow, matchWrap());
+
+        Button readTraffic = button("قراءة Traffic Statistics من الصفحة الحالية", false);
+        readTraffic.setOnClickListener(v -> readTrafficStatisticsFromPage(true));
+        trafficCard.addView(readTraffic, matchWrap());
+
+        Button inspectTraffic = button("فحص الصفحة وقراءة الإحصائيات", false);
+        inspectTraffic.setOnClickListener(v -> {
+            inspectCurrentPage();
+            readTrafficStatisticsFromPage(true);
+        });
+        trafficCard.addView(inspectTraffic, matchWrap());
+
+        trafficSummaryView = text("لم تُقرأ إحصائيات حركة البيانات بعد.", 13, true, DARK);
+        trafficSummaryView.setPadding(0, dp(8), 0, dp(6));
+        trafficCard.addView(trafficSummaryView, matchWrap());
+        trafficCards = new LinearLayout(this);
+        trafficCards.setOrientation(LinearLayout.VERTICAL);
+        trafficCard.addView(trafficCards, matchWrap());
+        trafficCard.addView(text("ملاحظة: التحديث شبه لحظي ويعتمد على سرعة استجابة Firmware الراوتر. صفر KB/s يعني عدم رصد نقل بيانات في لحظة القراءة، ولا يعني أن الجهاز مفصول. إجماليات MB تراكمية وليست سرعة حالية.", 11, false, MUTED), matchWrap());
+
+        gap(root, 10);
         LinearLayout schedule = card(root);
         schedule.addView(text("مساعد الجدولة: 4:00 مساءً إلى 12:00 منتصف الليل", 15, true, DARK), matchWrap());
         schedule.addView(text(
@@ -181,30 +251,6 @@ public class MainActivity extends Activity {
         browserCard.addView(browserActions, matchWrap());
         TextView webHint = text("سجّل الدخول داخل صفحة الراوتر نفسها. بعد فتح صفحة DHCP أو Wireless سيحاول التطبيق قراءة الجدول تلقائياً. لا تكتب كلمة المرور خارج صفحة الإدارة المحلية.", 12, false, MUTED);
         browserCard.addView(webHint, matchWrap());
-
-        gap(root, 10);
-        LinearLayout trafficCard = card(root);
-        trafficCard.addView(text("مراقبة حركة البيانات - Traffic Statistics", 17, true, DARK), matchWrap());
-        trafficCard.addView(text("اقرأ معدلات الرفع والتنزيل والبيانات المرسلة والمستلمة لكل IP من صفحة الراوتر. افتح الصفحة أولاً ثم اضغط قراءة الإحصائيات.", 12, false, MUTED), matchWrap());
-        Button openTrafficPage = button("فتح QoS ثم Traffic Statistics", true);
-        openTrafficPage.setOnClickListener(v -> openRouterSection("QoS", "Traffic Statistics"));
-        trafficCard.addView(openTrafficPage, matchWrap());
-        Button readTraffic = button("قراءة Traffic Statistics من الصفحة الحالية", false);
-        readTraffic.setOnClickListener(v -> readTrafficStatisticsFromPage(true));
-        trafficCard.addView(readTraffic, matchWrap());
-        Button inspectTraffic = button("فحص الصفحة وقراءة الإحصائيات", false);
-        inspectTraffic.setOnClickListener(v -> {
-            inspectCurrentPage();
-            readTrafficStatisticsFromPage(true);
-        });
-        trafficCard.addView(inspectTraffic, matchWrap());
-        trafficSummaryView = text("لم تُقرأ إحصائيات حركة البيانات بعد.", 13, true, DARK);
-        trafficSummaryView.setPadding(0, dp(8), 0, dp(6));
-        trafficCard.addView(trafficSummaryView, matchWrap());
-        trafficCards = new LinearLayout(this);
-        trafficCards.setOrientation(LinearLayout.VERTICAL);
-        trafficCard.addView(trafficCards, matchWrap());
-        trafficCard.addView(text("تنبيه: صفر KB/s يعني عدم رصد نقل بيانات في لحظة القراءة، ولا يعني أن الجهاز غير متصل. إجماليات MB تراكمية بحسب عداد الراوتر وقد تبدأ من آخر تفعيل أو تصفير للإحصائيات.", 11, false, MUTED), matchWrap());
 
         gap(root, 10);
         LinearLayout tools = card(root);
@@ -263,7 +309,7 @@ public class MainActivity extends Activity {
         diagnosticView.setTextIsSelectable(true);
         diagnostics.addView(diagnosticView, matchWrap());
 
-        TextView footer = text("الإصدار 0.2.5: لوحة المشتركين وقراءة Traffic Statistics. الحظر وتحديد السرعة غير مفعّلين بعد حتى نتحقق من نماذج الكتابة في الراوتر.", 12, true, MUTED);
+        TextView footer = text("الإصدار 0.2.6: المراقبة شبه اللحظية لسرعات المشتركين. الحظر وتحديد السرعة غير مفعّلين بعد حتى نتحقق من نماذج الكتابة في الراوتر.", 12, true, MUTED);
         footer.setPadding(dp(4), dp(12), dp(4), dp(4));
         root.addView(footer, matchWrap());
 
@@ -349,6 +395,7 @@ public class MainActivity extends Activity {
     }
 
     private void connectToRouter() {
+        if (liveMonitorRunning) stopLiveMonitoring("توقفت المراقبة بسبب إعادة الاتصال بالراوتر.");
         String ip = routerIp.getText().toString().trim();
         if (!isPrivateIpv4(ip)) {
             toast("أدخل عنوان IPv4 محلياً صحيحاً، مثل 192.168.0.1");
@@ -394,8 +441,33 @@ public class MainActivity extends Activity {
     }
 
     private void openRouterSection(String parentLabel, String childLabel) {
-        if (webView.getUrl() == null) {
+        if (webView == null || webView.getUrl() == null) {
             toast("اتصل بالراوتر وسجّل الدخول أولاً.");
+            return;
+        }
+        // The W303R QoS menu defaults to Bandwidth Control. Traffic Statistics
+        // is a sibling page in the same content frame, so navigate to its
+        // verified firmware path after opening QoS instead of relying only on
+        // a text click that may race the frame navigation.
+        if ("QoS".equalsIgnoreCase(parentLabel) && "Traffic Statistics".equalsIgnoreCase(childLabel)) {
+            status("أفتح QoS ثم صفحة Traffic Statistics...");
+            clickRouterLabel(parentLabel, parentFound -> {
+                if (!parentFound) {
+                    status("لم أجد تبويب QoS. افتحه يدوياً ثم أعد المحاولة.");
+                    return;
+                }
+                handler.postDelayed(() -> navigateRouterContentPath("/sys_iptAccount.asp", navigated -> {
+                    if (navigated) {
+                        status("تم فتح QoS > Traffic Statistics.");
+                        handler.postDelayed(() -> readTrafficStatisticsFromPage(false), 1000);
+                    } else {
+                        clickRouterLabel(childLabel, childFound -> {
+                            if (childFound) status("تم فتح QoS > Traffic Statistics.");
+                            else status("فُتح QoS، لكن تعذر فتح Traffic Statistics تلقائياً. اخترها يدوياً من القائمة الجانبية.");
+                        });
+                    }
+                }), 1200);
+            });
             return;
         }
         clickRouterLabel(parentLabel, parentFound -> handler.postDelayed(() ->
@@ -494,7 +566,7 @@ public class MainActivity extends Activity {
                 "function walk(w){try{for(var i=0;i<w.frames.length;i++){var f=w.frames[i],p='';" +
                 "try{p=path(f.location.href);}catch(e){}" +
                 "if(p===target)return true;" +
-                "if(p==='/lan_dhcp_clients.asp'||p==='/wireless_basic.asp'||p==='/wireless_state.asp'){" +
+                "if(p==='/lan_dhcp_clients.asp'||p==='/wireless_basic.asp'||p==='/wireless_state.asp'||p==='/net_tc.asp'){" +
                 "try{f.location.href=target;return true;}catch(e){}}" +
                 "if(walk(f))return true;}}catch(e){}return false;}" +
                 "if(walk(window))return true;" +
@@ -587,8 +659,19 @@ public class MainActivity extends Activity {
      * because the traffic table is keyed by IP and has no MAC column.
      */
     private void readTrafficStatisticsFromPage(boolean announceIfMissing) {
+        readTrafficStatisticsFromPage(announceIfMissing, 0, null);
+    }
+
+    /**
+     * Read the Traffic Statistics table from the top document or any same-origin
+     * router frame. A short retry is important because the Tenda firmware fills
+     * the statistics frame asynchronously after navigation/reload.
+     */
+    private void readTrafficStatisticsFromPage(boolean announceIfMissing, int attempt,
+                                               TrafficReadCallback callback) {
         if (webView == null || webView.getUrl() == null) {
             if (announceIfMissing) toast("اتصل بالراوتر وسجّل الدخول أولاً.");
+            if (callback != null) callback.onComplete(false);
             return;
         }
         String js = "(function(){" +
@@ -611,12 +694,142 @@ public class MainActivity extends Activity {
                 "var ipText=ipI>=0?(cells[ipI]||''):cells.join(' '),im=ipText.match(/(?:\\d{1,3}\\.){3}\\d{1,3}/);if(!im)continue;var addr=im[0];if(seen[addr])continue;seen[addr]=1;" +
                 "records.push({ip:addr,uplinkKBps:num(upI>=0?cells[upI]:''),downlinkKBps:num(downI>=0?cells[downI]:''),sentMessages:num(smI>=0?cells[smI]:''),sentMB:num(sbI>=0?cells[sbI]:''),receivedMessages:num(rmI>=0?cells[rmI]:''),receivedMB:num(rbI>=0?cells[rbI]:''),raw:cells.join(' | '),sourcePath:source});}}}" +
                 "if(records.length){TendaBridge.trafficStatistics(JSON.stringify(records),source);return records.length;}return 0;})()";
+        final int currentAttempt = attempt;
         webView.evaluateJavascript(js, result -> {
-            if (result == null || "null".equals(result) || "0".equals(result)) {
-                if (announceIfMissing) {
-                    status("لم أتعرف على جدول Traffic Statistics. افتح QoS ثم Traffic Statistics داخل نافذة الراوتر، وانتظر تحميل الجدول، ثم أعد القراءة.");
-                    toast("لم أجد جدول Traffic Statistics في الصفحة الحالية. استخدم زر فحص الصفحة لنسخ التقرير.");
+            int count = 0;
+            try {
+                String clean = result == null ? "" : result.replace("\"", "").trim();
+                count = Integer.parseInt(clean);
+            } catch (Exception ignored) { }
+            boolean found = count > 0;
+            if (!found && currentAttempt < 2) {
+                handler.postDelayed(() ->
+                        readTrafficStatisticsFromPage(announceIfMissing, currentAttempt + 1, callback), 650);
+                return;
+            }
+            if (!found && announceIfMissing) {
+                status("لم أتعرف على جدول Traffic Statistics. افتح QoS ثم Traffic Statistics داخل نافذة الراوتر، وانتظر تحميل الجدول، ثم أعد القراءة.");
+                toast("لم أجد جدول Traffic Statistics في الصفحة الحالية. افتح صفحة الإحصائيات ثم أعد القراءة.");
+            }
+            if (callback != null) {
+                boolean finalFound = found;
+                handler.postDelayed(() -> callback.onComplete(finalFound), 180);
+            }
+        });
+    }
+
+    /**
+     * Refresh only the router's Traffic Statistics content frame, not the whole
+     * advance.asp shell. The W303R firmware exposes this page as
+     * sys_iptAccount.asp inside the same-origin content frame.
+     */
+    private void refreshTrafficFrameThenRead(boolean announceIfMissing, TrafficReadCallback callback) {
+        if (webView == null || webView.getUrl() == null) {
+            if (announceIfMissing) toast("اتصل بالراوتر وافتح صفحة Traffic Statistics أولاً.");
+            if (callback != null) callback.onComplete(false);
+            return;
+        }
+        String js = "(function(){" +
+                "function norm(s){return (s||'').toLowerCase().replace(/[^a-z0-9]/g,'');}" +
+                "function hasTrafficTable(d){try{if(!d)return false;var ts=d.querySelectorAll('table');for(var i=0;i<ts.length;i++){var rs=ts[i].querySelectorAll('tr');for(var r=0;r<rs.length;r++){var h=Array.prototype.slice.call(rs[r].querySelectorAll('th,td')).map(function(e){return norm(e.innerText||e.textContent||'');});" +
+                "var ip=h.some(function(v){return v.indexOf('ipaddress')>=0;}),up=h.some(function(v){return v.indexOf('uplinkrate')>=0;}),down=h.some(function(v){return v.indexOf('downlinkrate')>=0;}),sent=h.some(function(v){return v.indexOf('sentbytes')>=0;}),recv=h.some(function(v){return v.indexOf('receivedbytes')>=0;});if(ip&&up&&down&&sent&&recv)return true;}}}catch(e){}return false;}" +
+                "function walk(w,depth){if(depth>5)return false;try{for(var i=0;i<w.frames.length;i++){var f=w.frames[i],p='',d=null;try{p=new URL(f.location.href).pathname.toLowerCase();}catch(e){}try{d=f.document;}catch(e){}" +
+                "if(p.indexOf('iptaccount.asp')>=0||hasTrafficTable(d)){try{f.location.reload();return true;}catch(e){}}" +
+                "if(walk(f,depth+1))return true;}}catch(e){}return false;}" +
+                "var p='';try{p=location.pathname.toLowerCase();}catch(e){}" +
+                "if(p.indexOf('iptaccount.asp')>=0||hasTrafficTable(document)){location.reload();return true;}" +
+                "return walk(window,0);})()";
+        webView.evaluateJavascript(js, result -> {
+            boolean reloaded = "true".equals(result);
+            long waitMs = reloaded ? 1300L : 250L;
+            handler.postDelayed(() ->
+                    readTrafficStatisticsFromPage(announceIfMissing, 0, callback), waitMs);
+        });
+    }
+
+    private void startLiveMonitoring() {
+        if (webView == null || webView.getUrl() == null) {
+            toast("اتصل بالراوتر أولاً.");
+            return;
+        }
+        if (liveMonitorRunning) {
+            toast("المراقبة الحية تعمل بالفعل.");
+            return;
+        }
+        liveMonitorRunning = true;
+        liveCycleBusy = false;
+        liveConsecutiveMisses = 0;
+        updateLiveControls();
+        if (liveStatusView != null) liveStatusView.setText("جارٍ بدء المراقبة الحية والبحث عن إطار Traffic Statistics...");
+        status("بدأت المراقبة شبه اللحظية. سيتم تحديث إطار الإحصائيات كل " + (livePollIntervalMs / 1000) + " ثوانٍ.");
+        handler.removeCallbacks(liveMonitorRunnable);
+        handler.post(liveMonitorRunnable);
+    }
+
+    private void stopLiveMonitoring(String reason) {
+        liveMonitorRunning = false;
+        liveCycleBusy = false;
+        handler.removeCallbacks(liveMonitorRunnable);
+        updateLiveControls();
+        if (liveStatusView != null) liveStatusView.setText(reason + " آخر قراءة ناجحة: " +
+                (trafficSnapshotAt > 0 ? formatTime(trafficSnapshotAt) : "غير متاحة"));
+        status(reason);
+    }
+
+    private void cycleLivePollInterval() {
+        livePollIntervalIndex = (livePollIntervalIndex + 1) % livePollIntervalsMs.length;
+        livePollIntervalMs = livePollIntervalsMs[livePollIntervalIndex];
+        if (liveIntervalButton != null) {
+            liveIntervalButton.setText("فاصل التحديث: " + (livePollIntervalMs / 1000) + " ثوانٍ");
+        }
+        if (liveMonitorRunning && !liveCycleBusy) {
+            handler.removeCallbacks(liveMonitorRunnable);
+            handler.postDelayed(liveMonitorRunnable, livePollIntervalMs);
+        }
+    }
+
+    private void updateLiveControls() {
+        if (liveStartButton != null) liveStartButton.setEnabled(!liveMonitorRunning);
+        if (liveStopButton != null) liveStopButton.setEnabled(liveMonitorRunning);
+        if (liveIntervalButton != null) liveIntervalButton.setEnabled(true);
+    }
+
+    private void runLiveMonitorCycle() {
+        if (!liveMonitorRunning || liveLifecyclePaused) return;
+        if (webView == null || webView.getUrl() == null) {
+            stopLiveMonitoring("توقفت المراقبة لعدم وجود اتصال بصفحة الراوتر.");
+            return;
+        }
+        if (liveCycleBusy) {
+            handler.postDelayed(liveMonitorRunnable, 500L);
+            return;
+        }
+        liveCycleBusy = true;
+        liveCycleStartedAt = System.currentTimeMillis();
+        refreshTrafficFrameThenRead(false, found -> {
+            liveCycleBusy = false;
+            if (!liveMonitorRunning || liveLifecyclePaused) return;
+            if (found) {
+                liveConsecutiveMisses = 0;
+                if (liveStatusView != null) {
+                    liveStatusView.setText("المراقبة الحية تعمل • آخر تحديث: " + formatTime(trafficSnapshotAt) +
+                            " • الفاصل: " + (livePollIntervalMs / 1000) + " ثوانٍ");
                 }
+            } else {
+                liveConsecutiveMisses++;
+                if (liveConsecutiveMisses >= 3) {
+                    stopLiveMonitoring("توقفت المراقبة: لم أجد جدول Traffic Statistics بعد 3 محاولات. افتح QoS > Traffic Statistics ثم ابدأ مجدداً.");
+                    return;
+                }
+                if (liveStatusView != null) {
+                    liveStatusView.setText("أحاول الوصول إلى جدول Traffic Statistics... المحاولة " +
+                            liveConsecutiveMisses + " من 3");
+                }
+            }
+            if (liveMonitorRunning) {
+                long elapsed = System.currentTimeMillis() - liveCycleStartedAt;
+                long nextDelay = Math.max(250L, livePollIntervalMs - elapsed);
+                handler.postDelayed(liveMonitorRunnable, nextDelay);
             }
         });
     }
@@ -634,6 +847,10 @@ public class MainActivity extends Activity {
             trafficSnapshotAt = System.currentTimeMillis();
             trafficSourcePath = sourcePath == null ? "" : sourcePath;
             renderTrafficCards();
+            if (liveStatusView != null && !liveMonitorRunning) {
+                liveStatusView.setText("آخر قراءة ناجحة: " + formatTime(trafficSnapshotAt) +
+                        " • المراقبة الحية متوقفة.");
+            }
             status("تمت قراءة Traffic Statistics: " + trafficSnapshot.size() + " عنوان IP.");
         } catch (JSONException e) {
             if (trafficSummaryView != null) trafficSummaryView.setText("تعذر تحليل جدول Traffic Statistics. انسخ تقرير التشخيص وأرسله.");
@@ -642,6 +859,7 @@ public class MainActivity extends Activity {
 
     private void renderTrafficCards() {
         if (trafficSummaryView == null || trafficCards == null) return;
+        final int oldScrollY = mainScrollView == null ? 0 : mainScrollView.getScrollY();
         trafficCards.removeAllViews();
         if (trafficSnapshot.isEmpty()) {
             trafficSummaryView.setText("لم يتم العثور على سجلات Traffic Statistics.");
@@ -654,12 +872,13 @@ public class MainActivity extends Activity {
             totalSent += item.optDouble("sentMB", 0);
             totalReceived += item.optDouble("receivedMB", 0);
         }
-        trafficSummaryView.setText("عدد عناوين IP: " + trafficSnapshot.size() +
-                "\nمجموع الرفع الحالي: " + String.format(Locale.US, "%.2f", totalUp) + " KB/s" +
-                "\nمجموع التنزيل الحالي: " + String.format(Locale.US, "%.2f", totalDown) + " KB/s" +
-                "\nإجمالي Sent: " + String.format(Locale.US, "%.2f", totalSent) + " MB" +
-                "\nإجمالي Received: " + String.format(Locale.US, "%.2f", totalReceived) + " MB" +
-                "\nآخر قراءة: " + formatTime(trafficSnapshotAt) + " | الصفحة: " + trafficSourcePath);
+        trafficSummaryView.setText("المشتركون المقروءون: " + trafficSnapshot.size() +
+                "\nإجمالي سرعة الرفع الآن: " + String.format(Locale.US, "%.2f", totalUp) + " KB/s" +
+                "\nإجمالي سرعة التنزيل الآن: " + String.format(Locale.US, "%.2f", totalDown) + " KB/s" +
+                "\nإجمالي البيانات المرسلة: " + String.format(Locale.US, "%.2f", totalSent) + " MB" +
+                "\nإجمالي البيانات المستلمة: " + String.format(Locale.US, "%.2f", totalReceived) + " MB" +
+                "\nآخر تحديث: " + formatTime(trafficSnapshotAt) +
+                (liveMonitorRunning ? " | تحديث آلي كل " + (livePollIntervalMs / 1000) + " ثوانٍ" : ""));
 
         for (JSONObject item : trafficSnapshot.values()) {
             String ip = item.optString("ip", "");
@@ -667,8 +886,13 @@ public class MainActivity extends Activity {
             for (JSONObject candidate : dhcpSnapshot.values()) {
                 if (ip.equals(candidate.optString("ip", ""))) { dhcp = candidate; break; }
             }
-            String name = dhcp == null ? "جهاز غير مربوط بسجل DHCP" : displayName(dhcp.optString("mac", ""), dhcp);
-            String mac = dhcp == null ? "MAC غير متاح في آخر قراءة DHCP" : dhcp.optString("mac", "غير متاح");
+            String name = dhcp == null ? "جهاز غير مربوط بسجل DHCP" :
+                    displayName(dhcp.optString("mac", ""), dhcp);
+            String mac = dhcp == null ? "MAC غير متاح في آخر قراءة DHCP" :
+                    dhcp.optString("mac", "غير متاح");
+            double up = item.optDouble("uplinkKBps", 0);
+            double down = item.optDouble("downlinkKBps", 0);
+            boolean active = (up + down) > 0.0001;
 
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.VERTICAL);
@@ -678,16 +902,37 @@ public class MainActivity extends Activity {
             bg.setCornerRadius(dp(10));
             bg.setStroke(dp(1), BORDER);
             row.setBackground(bg);
-            row.addView(text(name + "  |  " + ip, 14, true, DARK), matchWrap());
+
+            row.addView(text(name + "  |  " + ip, 15, true, DARK), matchWrap());
             row.addView(text("MAC: " + mac, 11, false, MUTED), matchWrap());
-            row.addView(text("Upload: " + String.format(Locale.US, "%.2f", item.optDouble("uplinkKBps", 0)) + " KB/s" +
-                    "     Download: " + String.format(Locale.US, "%.2f", item.optDouble("downlinkKBps", 0)) + " KB/s", 12, true, DARK), matchWrap());
+            row.addView(text(active ? "حركة بيانات مرصودة الآن" : "لا يوجد نقل بيانات في لحظة القراءة",
+                    11, true, active ? Color.rgb(22, 128, 70) : MUTED), matchWrap());
+
+            LinearLayout rates = new LinearLayout(this);
+            rates.setOrientation(LinearLayout.HORIZONTAL);
+            TextView downloadRate = text("↓ Download\n" +
+                    String.format(Locale.US, "%.2f", down) + " KB/s", 13, true,
+                    Color.rgb(22, 128, 70));
+            TextView uploadRate = text("↑ Upload\n" +
+                    String.format(Locale.US, "%.2f", up) + " KB/s", 13, true,
+                    Color.rgb(37, 99, 235));
+            downloadRate.setGravity(Gravity.CENTER);
+            uploadRate.setGravity(Gravity.CENTER);
+            rates.addView(downloadRate, new LinearLayout.LayoutParams(0, -2, 1));
+            rates.addView(uploadRate, new LinearLayout.LayoutParams(0, -2, 1));
+            row.addView(rates, matchWrap());
+
             row.addView(text("Sent: " + String.format(Locale.US, "%.2f", item.optDouble("sentMB", 0)) + " MB" +
-                    "     Received: " + String.format(Locale.US, "%.2f", item.optDouble("receivedMB", 0)) + " MB", 12, false, MUTED), matchWrap());
+                    "     Received: " + String.format(Locale.US, "%.2f", item.optDouble("receivedMB", 0)) + " MB",
+                    12, false, MUTED), matchWrap());
             row.addView(text("Sent packets: " + String.format(Locale.US, "%.0f", item.optDouble("sentMessages", 0)) +
-                    "     Received packets: " + String.format(Locale.US, "%.0f", item.optDouble("receivedMessages", 0)), 11, false, MUTED), matchWrap());
+                    "     Received packets: " + String.format(Locale.US, "%.0f", item.optDouble("receivedMessages", 0)),
+                    11, false, MUTED), matchWrap());
             trafficCards.addView(row, matchWrap());
             gap(trafficCards, 6);
+        }
+        if (mainScrollView != null) {
+            mainScrollView.post(() -> mainScrollView.scrollTo(0, oldScrollY));
         }
     }
 
@@ -1082,6 +1327,29 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onPause() {
+        super.onPause();
+        if (liveMonitorRunning) {
+            liveLifecyclePaused = true;
+            liveCycleBusy = false;
+            handler.removeCallbacks(liveMonitorRunnable);
+            if (liveStatusView != null) liveStatusView.setText("المراقبة الحية متوقفة مؤقتاً لأن التطبيق في الخلفية.");
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (liveMonitorRunning) {
+            liveLifecyclePaused = false;
+            liveCycleBusy = false;
+            handler.removeCallbacks(liveMonitorRunnable);
+            handler.post(liveMonitorRunnable);
+            if (liveStatusView != null) liveStatusView.setText("استؤنفت المراقبة الحية...");
+        }
+    }
+
+    @Override
     public void onBackPressed() {
         if (webView != null && webView.canGoBack()) webView.goBack();
         else super.onBackPressed();
@@ -1089,6 +1357,8 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        liveMonitorRunning = false;
+        handler.removeCallbacks(liveMonitorRunnable);
         if (webView != null) {
             webView.removeJavascriptInterface("TendaBridge");
             webView.stopLoading();
