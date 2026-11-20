@@ -1,11 +1,20 @@
 # سجل التغييرات
 
+## 0.2.8 — Verified Router Paths
+- تصحيح اختصار MAC: يعتمد الآن على `Wireless > Access Control` والمسار المؤكد `/wireless_filter.asp`؛ أزيل المسار غير الصحيح `/firewall_macfilter.asp`.
+- فصل اختصار `Security > URL Filtering` عن تصفية MAC. المسار المؤكد من تقرير الراوتر هو `/firewall_urlfilter.asp`، وتعرض الصفحة نطاق IP ونص URL ووقت البداية والنهاية وأيام الأسبوع وخيار Enable.
+- تصحيح `Tools > Time Settings` إلى المسار الذي أعلنته قائمة الراوتر `/system_hostname.asp` بدلاً من `/system_time.asp`.
+- تحسين الرجوع إلى قوائم الراوتر: بعد الضغط على التبويب الرئيسي يتحقق التطبيق أولاً مما إذا كان التبويب قد فتح صفحة الهدف مباشرة، ثم يبحث عن الصفحة الفرعية عند الحاجة.
+- تحديث أسماء الاختصارات والشرح حتى لا توصف URL Filtering على أنها MAC Filtering.
+- لم تتم إضافة أي أوامر لتغيير إعدادات الراوتر؛ وظائف الإصدار للقراءة والتنقل فقط. يجب فحص حقول Time Settings على الجهاز قبل إضافة أي وظيفة تعديل.
+- بقي ملف `.github/workflows/android.yaml` دون تغيير.
+
 ## 0.2.7 — Router Navigation & Device Association Fixes
 - إصلاح اختصارات صفحات الراوتر باستخدام مسارات المحتوى المحلية المعروفة بدلاً من الاعتماد حصراً على النقر النصي على القوائم.
 - التحقق من أن الإطار الداخلي وصل فعلياً إلى الصفحة المطلوبة، مع الرجوع إلى قائمة الراوتر عند فشل المسار المباشر.
 - إضافة اختصار مستقل إلى Wireless > Access Control للسماح أو منع الانضمام إلى شبكة Wi-Fi.
-- تصحيح الفصل بين Wireless Access Control (السماح بالاتصال اللاسلكي) وSecurity > MAC Address Filter (التحكم في الوصول إلى الإنترنت وفق MAC والوقت والأيام).
-- دعم صفحات DHCP Client List وWireless Connection Status وBandwidth Control وTraffic Statistics وMAC Address Filter وTime Settings.
+- في هذه النسخة كان مسار Security يُعامل خطأً على أنه MAC Address Filter؛ تقرير Firmware الذي وصل لاحقاً أثبت أنه URL Filtering، وصُحح ذلك في 0.2.8.
+- دعم صفحات DHCP Client List وWireless Connection Status وWireless Access Control وBandwidth Control وTraffic Statistics وTime Settings؛ أما Security URL Filtering فتم تثبيت هويته ومساره في 0.2.8.
 - منع الجداول غير المرتبطة بالأجهزة في صفحات الراوتر العامة من الظهور على أنها سجلات أجهزة غير مصنفة.
 - الاحتفاظ بآخر ربط DHCP صالح بين MAC وIP محلياً لمدة 24 ساعة، مع تمييز العنوان التاريخي بوضوح وعدم عرضه على أنه IP حالي.
 - استخدام آخر ربط DHCP معروف لإثراء بطاقات Wi-Fi وTraffic Statistics عند غياب سجل DHCP حديث، مع توضيح أن MAC/IP من آخر سجل معروف.

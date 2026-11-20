@@ -1,13 +1,22 @@
-# Tenda W303 Guard — الإصدار 0.2.7
+# Tenda W303 Guard — الإصدار 0.2.8
 
 تطبيق Android بلغة Java لمراقبة أجهزة راوتر Tenda W303R V3.0، Firmware `V5.07.46_en`.
 
-## الجديد في 0.2.7 — Router Navigation & Device Association Fixes
+## الجديد في 0.2.8 — Verified Router Paths
+
+- `Wireless > Access Control` هو مسار MAC Access Control المؤكد: `/wireless_filter.asp`، ويتحكم بمن يستطيع الانضمام إلى شبكة Wi-Fi.
+- `Security` يفتح صفحة URL Filtering بالمسار `/firewall_urlfilter.asp`، وليس صفحة MAC Filter. تحتوي الصفحة التي فُحصت على Start IP وEnd IP وURL Character String والوقت وأيام الأسبوع وخيار Enable.
+- `Tools > Time Settings` يستخدم المسار الذي أعلنته قائمة الراوتر `/system_hostname.asp`. تم تصحيح المسار القديم `/system_time.asp`؛ لم تُفحص حقول صفحة الوقت بعد، لذلك لا يرسل التطبيق أي تغييرات إليها.
+- أزيل المسار غير الصحيح `/firewall_macfilter.asp`، وأصبح اختصار الشاشة الرئيسية واضحاً: «تصفية المواقع وجدولة الوصول».
+- تحسين مسار الرجوع من التبويب الرئيسي: يتحقق التطبيق مما إذا كان التبويب يفتح صفحة الهدف مباشرة قبل محاولة البحث عن عنصر فرعي.
+- ملف `.github/workflows/android.yaml` بقي كما هو دون تعديل.
+
+## الميزات المستمرة من 0.2.7 — Router Navigation & Device Association Fixes
 
 - إصلاح اختصارات التنقل بين صفحات الراوتر بالاعتماد على مسارات الصفحات المعروفة والتحقق من الإطار الداخلي بعد الانتقال.
-- دعم مباشر لصفحات DHCP Client List وWireless Connection Status وWireless Access Control وSecurity MAC Address Filter وTime Settings وQoS.
+- دعم مباشر لصفحات DHCP Client List وWireless Connection Status وWireless Access Control وSecurity URL Filtering وTime Settings وQoS.
 - إضافة اختصار منفصل إلى Wireless > Access Control للتحكم في الأجهزة التي يسمح لها بالانضمام إلى Wi-Fi.
-- توضيح الفرق بين Wireless Access Control الذي يتحكم بالاتصال اللاسلكي، وSecurity > MAC Address Filter الذي يتحكم بوصول الأجهزة إلى الإنترنت وفق MAC والجدول الزمني.
+- توضيح الفرق بين Wireless Access Control الذي يتحكم بالاتصال اللاسلكي، وSecurity > URL Filtering الذي يتحكم بتصفية المواقع وفق IP والوقت والأيام.
 - منع الجداول العامة في صفحات الراوتر الأخرى من أن تُصنّف خطأً كأجهزة غير معروفة.
 - حفظ آخر ربط صحيح بين MAC وIP لمدة 24 ساعة، لكل راوتر على حدة. إذا غاب سجل DHCP الحالي، يعرض التطبيق «آخر IP معروف» ولا يدّعي أنه العنوان الحالي.
 - استخدام آخر ربط DHCP معروف لعرض اسم/MAC في Traffic Statistics عند غياب السجل الحديث، مع وسمه بوضوح بأنه تاريخي.

@@ -10,8 +10,8 @@ android {
         applicationId 'com.tenda.w303guard'
         minSdk 23
         targetSdk 28
-        versionCode 9
-        versionName '0.2.7-router-fixes'
+        versionCode 10
+        versionName '0.2.8-router-paths'
     }
 
     compileOptions {

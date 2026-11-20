@@ -1,4 +1,4 @@
-# اختبار إصلاح التنقل وربط IP — v0.2.7
+# اختبار إصلاح التنقل وربط IP — v0.2.8
 
 ## قبل الاختبار
 - الهاتف متصل بشبكة Tenda W303R.
@@ -9,8 +9,8 @@
 1. اضغط «قائمة أجهزة DHCP» وتحقق من ظهور جدول Host Name / IP Address / MAC Address / Lease Time.
 2. اضغط «الأجهزة اللاسلكية المتصلة» وتحقق من ظهور جدول MAC Address / Bandwidth.
 3. اضغط «السماح أو منع اتصال Wi-Fi» وتحقق من فتح Wireless > Access Control.
-4. اضغط «تصفية MAC وجدولة الإنترنت» وتحقق من فتح Security > MAC Address Filter.
-5. اضغط «ضبط وقت الراوتر» وتحقق من فتح Tools > Time Settings.
+4. اضغط «تصفية المواقع وجدولة الوصول» وتحقق من فتح Security > URL Filtering على المسار `/firewall_urlfilter.asp`. تحقق من ظهور حقول Start IP وEnd IP وURL Character String والوقت وأيام الأسبوع.
+5. اضغط «ضبط وقت الراوتر» وتحقق من فتح Tools > Time Settings على المسار `/system_hostname.asp`. لا تحفظ أي تغيير؛ أرسل تقرير فحص الحقول إذا ظهرت الصفحة.
 6. اضغط «QoS وتحديد السرعة» وتحقق من فتح Bandwidth Control.
 7. اضغط «QoS - Traffic Statistics» وتحقق من ظهور جدول IP Address وUplink/Downlink Rate وSent/Received Bytes.
 

@@ -161,8 +161,8 @@ public class MainActivity extends Activity {
         nav.addView(text("اختصارات صفحات الراوتر", 15, true, DARK), matchWrap());
         addNavButton(nav, "قائمة أجهزة DHCP", () -> openRouterSection("Advanced", "DHCP Client List"));
         addNavButton(nav, "الأجهزة اللاسلكية المتصلة", () -> openRouterSection("Wireless", "Wireless Connection Status"));
-        addNavButton(nav, "السماح أو منع اتصال Wi-Fi", () -> openRouterSection("Wireless", "Access Control"));
-        addNavButton(nav, "تصفية MAC وجدولة الإنترنت", () -> openRouterSection("Security", "MAC Address Filter"));
+        addNavButton(nav, "السماح أو منع اتصال Wi-Fi (MAC)", () -> openRouterSection("Wireless", "Access Control"));
+        addNavButton(nav, "تصفية المواقع وجدولة الوصول", () -> openRouterSection("Security", "URL Filtering"));
         addNavButton(nav, "ضبط وقت الراوتر", () -> openRouterSection("Tools", "Time Settings"));
         addNavButton(nav, "QoS وتحديد السرعة", () -> openRouterSection("QoS", "Bandwidth Control"));
         addNavButton(nav, "QoS - Traffic Statistics", () -> openRouterSection("QoS", "Traffic Statistics"));
@@ -223,14 +223,12 @@ public class MainActivity extends Activity {
 
         gap(root, 10);
         LinearLayout schedule = card(root);
-        schedule.addView(text("مساعد الجدولة: 4:00 مساءً إلى 12:00 منتصف الليل", 15, true, DARK), matchWrap());
+        schedule.addView(text("تصفية المواقع وجدولة الوصول", 15, true, DARK), matchWrap());
         schedule.addView(text(
-                "دليل W303R يوضح أن MAC Address Filter يدعم وضع Forbid only أو Permit only، ورقم سياسة، وعنوان MAC، ووقت البداية والنهاية، وأيام الأسبوع، وخيار Enable. " +
-                "إذا كان المطلوب منع الجهاز خارج فترة 16:00–24:00، فالخطة المرشحة هي Forbid only بوقت 00:00–16:00 لكل جهاز، مع اختيار جميع الأيام. " +
-                "هذا شرح للقاعدة وليس تطبيقاً تلقائياً لها؛ اختبر جهازاً واحداً أولاً، ولا تستخدم 00:00–00:00 لأنها موثقة كقاعدة تعمل طوال 24 ساعة.",
+                "تقرير Firmware الذي أرسلته يثبت أن Security يفتح صفحة URL Filtering، وفيها نطاق IP (Start IP / End IP)، ونص URL، ووقت البداية والنهاية، وأيام الأسبوع، وخيار Enable. هذه قاعدة لتصفية المواقع وفق IP والوقت، وليست تصفية MAC.",
                 13, false, MUTED), matchWrap());
         schedule.addView(text(
-                "مهم: Wireless > Access Control يتحكم بمن يستطيع الانضمام إلى شبكة Wi-Fi. أما Security > MAC Address Filter فيتحكم بوصول الجهاز إلى الإنترنت وفق MAC والوقت والأيام. هاتان وظيفتان منفصلتان.",
+                "مهم: Wireless > Access Control هو المكان المؤكد للتحكم بعناوين MAC المسموح لها أو الممنوعة من الانضمام إلى شبكة Wi-Fi. أما Security > URL Filtering فيتحكم في الوصول إلى مواقع محددة وفق الحقول التي يعرضها الراوتر. لا تخلط بين الوظيفتين.",
                 13, true, DARK), matchWrap());
 
         gap(root, 10);
@@ -316,7 +314,7 @@ public class MainActivity extends Activity {
         diagnosticView.setTextIsSelectable(true);
         diagnostics.addView(diagnosticView, matchWrap());
 
-        TextView footer = text("الإصدار 0.2.7: إصلاح التنقل وربط الأجهزة مع المراقبة شبه اللحظية لسرعات المشتركين. الحظر وتحديد السرعة غير مفعّلين بعد حتى نتحقق من نماذج الكتابة في الراوتر.", 12, true, MUTED);
+        TextView footer = text("الإصدار 0.2.8: تصحيح مسارات URL Filtering وTime Settings وفصلها عن MAC Access Control، مع استمرار المراقبة شبه اللحظية للمشتركين.", 12, true, MUTED);
         footer.setPadding(dp(4), dp(12), dp(4), dp(4));
         root.addView(footer, matchWrap());
 
@@ -454,9 +452,9 @@ public class MainActivity extends Activity {
         if ("Advanced".equalsIgnoreCase(parentLabel) && "DHCP Client List".equalsIgnoreCase(childLabel)) return "/lan_dhcp_clients.asp";
         if ("Wireless".equalsIgnoreCase(parentLabel) && "Wireless Connection Status".equalsIgnoreCase(childLabel)) return "/wireless_state.asp";
         if ("Wireless".equalsIgnoreCase(parentLabel) && "Access Control".equalsIgnoreCase(childLabel)) return "/wireless_filter.asp";
-        if ("Security".equalsIgnoreCase(parentLabel) && ("MAC Address Filter Settings".equalsIgnoreCase(childLabel)
-                || "MAC Address Filter".equalsIgnoreCase(childLabel))) return "/firewall_macfilter.asp";
-        if ("Tools".equalsIgnoreCase(parentLabel) && "Time Settings".equalsIgnoreCase(childLabel)) return "/system_time.asp";
+        if ("Security".equalsIgnoreCase(parentLabel) && ("URL Filtering".equalsIgnoreCase(childLabel)
+                || "URL Filter".equalsIgnoreCase(childLabel))) return "/firewall_urlfilter.asp";
+        if ("Tools".equalsIgnoreCase(parentLabel) && "Time Settings".equalsIgnoreCase(childLabel)) return "/system_hostname.asp";
         if ("QoS".equalsIgnoreCase(parentLabel) && "Bandwidth Control".equalsIgnoreCase(childLabel)) return "/net_tc.asp";
         if ("QoS".equalsIgnoreCase(parentLabel) && "Traffic Statistics".equalsIgnoreCase(childLabel)) return "/sys_iptAccount.asp";
         return null;
@@ -483,16 +481,20 @@ public class MainActivity extends Activity {
                     openRouterSectionByMenu(parentLabel, childLabel);
                     return;
                 }
-                status("تم فتح " + childLabel + ". جارٍ فحص محتوى الصفحة...");
-                inspectCurrentPage();
-                if ("DHCP Client List".equalsIgnoreCase(childLabel)
-                        || "Wireless Connection Status".equalsIgnoreCase(childLabel)) {
-                    readDevicesFromPage();
-                } else if ("Traffic Statistics".equalsIgnoreCase(childLabel)) {
-                    readTrafficStatisticsFromPage(true);
-                }
+                finishRouterSectionOpen(childLabel);
             }), 650);
         });
+    }
+
+    private void finishRouterSectionOpen(String childLabel) {
+        status("تم فتح " + childLabel + ". جارٍ فحص محتوى الصفحة...");
+        inspectCurrentPage();
+        if ("DHCP Client List".equalsIgnoreCase(childLabel)
+                || "Wireless Connection Status".equalsIgnoreCase(childLabel)) {
+            readDevicesFromPage();
+        } else if ("Traffic Statistics".equalsIgnoreCase(childLabel)) {
+            readTrafficStatisticsFromPage(true);
+        }
     }
 
     private void openRouterSectionByMenu(String parentLabel, String childLabel) {
@@ -501,27 +503,48 @@ public class MainActivity extends Activity {
                 status("لم أجد تبويب " + parentLabel + ". تأكد من تسجيل الدخول ثم أعد المحاولة.");
                 return;
             }
-            handler.postDelayed(() -> clickRouterLabelAny(childLabelAliases(childLabel), 0, childFound -> {
-                if (childFound) {
-                    status("تم فتح " + childLabel + " من قائمة الراوتر.");
-                    handler.postDelayed(() -> {
-                        inspectCurrentPage();
-                        if ("DHCP Client List".equalsIgnoreCase(childLabel)
-                                || "Wireless Connection Status".equalsIgnoreCase(childLabel)) readDevicesFromPage();
-                        else if ("Traffic Statistics".equalsIgnoreCase(childLabel)) readTrafficStatisticsFromPage(true);
-                    }, 900);
+            handler.postDelayed(() -> {
+                String expectedPath = routerPagePath(parentLabel, childLabel);
+                if (expectedPath != null) {
+                    verifyRouterContentPath(expectedPath, 0, alreadyAtTarget -> {
+                        if (alreadyAtTarget) finishRouterSectionOpen(childLabel);
+                        else clickRouterChildFromMenu(parentLabel, childLabel, expectedPath);
+                    });
                 } else {
-                    status("فُتح " + parentLabel + " لكن لم أجد الصفحة الفرعية " + childLabel + ". افتحها يدوياً ثم أعد الفحص.");
+                    clickRouterChildFromMenu(parentLabel, childLabel, null);
                 }
-            }), 850);
+            }, 850);
+        });
+    }
+
+    private void clickRouterChildFromMenu(String parentLabel, String childLabel, String expectedPath) {
+        clickRouterLabelAny(childLabelAliases(childLabel), 0, childFound -> {
+            if (!childFound) {
+                status("فُتح " + parentLabel + " لكن لم أجد الصفحة الفرعية " + childLabel + ". افتحها يدوياً ثم أعد المحاولة.");
+                return;
+            }
+            handler.postDelayed(() -> {
+                if (expectedPath == null) {
+                    finishRouterSectionOpen(childLabel);
+                } else {
+                    verifyRouterContentPath(expectedPath, 0, verified -> {
+                        if (verified) finishRouterSectionOpen(childLabel);
+                        else {
+                            status("تم اختيار " + childLabel + " لكن لم أستطع تأكيد عنوان الصفحة. افحص الصفحة قبل المتابعة.");
+                            inspectCurrentPage();
+                        }
+                    });
+                }
+            }, 900);
         });
     }
 
     private String[] childLabelAliases(String childLabel) {
-        if ("MAC Address Filter".equalsIgnoreCase(childLabel) || "MAC Address Filter Settings".equalsIgnoreCase(childLabel)) {
-            return new String[]{"MAC Address Filter Settings", "MAC Address Filter", "MAC Filter"};
+        if ("URL Filtering".equalsIgnoreCase(childLabel) || "URL Filter".equalsIgnoreCase(childLabel)) {
+            return new String[]{"URL Filtering", "URL Filter", "URL Filter Settings", "Website Filter"};
         }
         if ("Time Settings".equalsIgnoreCase(childLabel)) return new String[]{"Time Settings", "Time"};
+        if ("Access Control".equalsIgnoreCase(childLabel)) return new String[]{"Access Control"};
         return new String[]{childLabel};
     }
 
