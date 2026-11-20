@@ -13,6 +13,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
+import android.text.method.DigitsKeyListener;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.Gravity;
@@ -35,7 +36,6 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-import java.net.InetAddress;
 import java.io.ByteArrayInputStream;
 import java.util.LinkedHashMap;
 import java.util.Locale;
@@ -147,9 +147,14 @@ public class MainActivity extends Activity {
         routerIp.setSingleLine(true);
         routerIp.setText(preferences.getString("router_ip", DEFAULT_ROUTER));
         routerIp.setTextDirection(View.TEXT_DIRECTION_LTR);
-        routerIp.setInputType(InputType.TYPE_CLASS_PHONE);
+        // The field accepts an IPv4 address only (digits and dots), not a full URL.
+        // DigitsKeyListener also exposes a numeric keypad that includes the dot.
+        routerIp.setKeyListener(DigitsKeyListener.getInstance("0123456789."));
+        routerIp.setHint("مثال: 192.168.0.1");
+        routerIp.setSelectAllOnFocus(true);
         routerIp.setPadding(dp(12), dp(8), dp(12), dp(8));
         connection.addView(routerIp, new LinearLayout.LayoutParams(-1, dp(48)));
+        connection.addView(text("أدخل عنوان IP فقط، مثل 192.168.0.1، دون كتابة http:// أو اسم الصفحة.", 11, false, MUTED), matchWrap());
         Button connect = button("اتصال وفتح صفحة الراوتر", true);
         connect.setOnClickListener(v -> connectToRouter());
         connection.addView(connect, matchWrap());
@@ -249,7 +254,7 @@ public class MainActivity extends Activity {
         Button routerHome = button("الصفحة الرئيسية", false);
         routerHome.setOnClickListener(v -> {
             if (webView.getUrl() == null) connectToRouter();
-            else webView.loadUrl("http://" + activeHost + "/");
+            else webView.loadUrl("http://" + activeHost + "/advance.asp");
         });
         browserActions.addView(reloadPage, new LinearLayout.LayoutParams(0, -2, 1));
         browserActions.addView(routerHome, new LinearLayout.LayoutParams(0, -2, 1));
@@ -427,7 +432,9 @@ public class MainActivity extends Activity {
         if (deviceCards != null) deviceCards.removeAllViews();
         devicesView.setText("لم تتم قراءة الأجهزة بعد.");
         diagnosticView.setText("سيظهر تقرير الصفحة بعد تحميل واجهة الراوتر.");
-        webView.loadUrl("http://" + activeHost + "/");
+        // This firmware's working administration shell is /advance.asp.
+        // The root path (/) can return an empty document on this router.
+        webView.loadUrl("http://" + activeHost + "/advance.asp");
     }
 
     private boolean isAllowedRouterUri(Uri uri) {
@@ -437,15 +444,21 @@ public class MainActivity extends Activity {
 
     private boolean isPrivateIpv4(String ip) {
         if (ip == null || !ip.matches("\\d{1,3}(\\.\\d{1,3}){3}")) return false;
+        String[] parts = ip.split("\\.", -1);
+        if (parts.length != 4) return false;
+        int[] octets = new int[4];
         try {
-            byte[] b = InetAddress.getByName(ip).getAddress();
-            if (b.length != 4) return false;
-            int a = b[0] & 255, second = b[1] & 255;
-            return a == 10 || (a == 172 && second >= 16 && second <= 31)
-                    || (a == 192 && second == 168) || (a == 169 && second == 254);
-        } catch (Exception e) {
+            for (int i = 0; i < 4; i++) {
+                if (parts[i].isEmpty() || parts[i].length() > 3) return false;
+                octets[i] = Integer.parseInt(parts[i]);
+                if (octets[i] < 0 || octets[i] > 255) return false;
+            }
+        } catch (NumberFormatException e) {
             return false;
         }
+        int first = octets[0], second = octets[1];
+        return first == 10 || (first == 172 && second >= 16 && second <= 31)
+                || (first == 192 && second == 168) || (first == 169 && second == 254);
     }
 
     private String routerPagePath(String parentLabel, String childLabel) {
