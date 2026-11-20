@@ -77,6 +77,13 @@ public class MainActivity extends Activity {
     private String lastDevices = "";
     private final Map<String, JSONObject> dhcpSnapshot = new LinkedHashMap<>();
     private final Map<String, JSONObject> wirelessSnapshot = new LinkedHashMap<>();
+    // Traffic Statistics is keyed by router-reported IP address; DHCP is used
+    // only to enrich the row with the most recent known name and MAC address.
+    private final Map<String, JSONObject> trafficSnapshot = new LinkedHashMap<>();
+    private long trafficSnapshotAt = 0L;
+    private String trafficSourcePath = "";
+    private TextView trafficSummaryView;
+    private LinearLayout trafficCards;
     private boolean hasDhcpSnapshot = false;
     private boolean hasWirelessSnapshot = false;
     private long dhcpSnapshotAt = 0L;
@@ -132,6 +139,7 @@ public class MainActivity extends Activity {
         addNavButton(nav, "تصفية MAC وجدولة الإنترنت", () -> openRouterSection("Security", "MAC Address Filter Settings"));
         addNavButton(nav, "ضبط وقت الراوتر", () -> openRouterSection("Tools", "Time Settings"));
         addNavButton(nav, "QoS وتحديد السرعة", () -> openRouterSection("QoS", "Bandwidth Control"));
+        addNavButton(nav, "QoS - Traffic Statistics", () -> openRouterSection("QoS", "Traffic Statistics"));
         addNavButton(nav, "الرجوع في صفحات الراوتر", () -> {
             if (webView != null && webView.canGoBack()) webView.goBack();
         });
@@ -173,6 +181,30 @@ public class MainActivity extends Activity {
         browserCard.addView(browserActions, matchWrap());
         TextView webHint = text("سجّل الدخول داخل صفحة الراوتر نفسها. بعد فتح صفحة DHCP أو Wireless سيحاول التطبيق قراءة الجدول تلقائياً. لا تكتب كلمة المرور خارج صفحة الإدارة المحلية.", 12, false, MUTED);
         browserCard.addView(webHint, matchWrap());
+
+        gap(root, 10);
+        LinearLayout trafficCard = card(root);
+        trafficCard.addView(text("مراقبة حركة البيانات - Traffic Statistics", 17, true, DARK), matchWrap());
+        trafficCard.addView(text("اقرأ معدلات الرفع والتنزيل والبيانات المرسلة والمستلمة لكل IP من صفحة الراوتر. افتح الصفحة أولاً ثم اضغط قراءة الإحصائيات.", 12, false, MUTED), matchWrap());
+        Button openTrafficPage = button("فتح QoS ثم Traffic Statistics", true);
+        openTrafficPage.setOnClickListener(v -> openRouterSection("QoS", "Traffic Statistics"));
+        trafficCard.addView(openTrafficPage, matchWrap());
+        Button readTraffic = button("قراءة Traffic Statistics من الصفحة الحالية", false);
+        readTraffic.setOnClickListener(v -> readTrafficStatisticsFromPage(true));
+        trafficCard.addView(readTraffic, matchWrap());
+        Button inspectTraffic = button("فحص الصفحة وقراءة الإحصائيات", false);
+        inspectTraffic.setOnClickListener(v -> {
+            inspectCurrentPage();
+            readTrafficStatisticsFromPage(true);
+        });
+        trafficCard.addView(inspectTraffic, matchWrap());
+        trafficSummaryView = text("لم تُقرأ إحصائيات حركة البيانات بعد.", 13, true, DARK);
+        trafficSummaryView.setPadding(0, dp(8), 0, dp(6));
+        trafficCard.addView(trafficSummaryView, matchWrap());
+        trafficCards = new LinearLayout(this);
+        trafficCards.setOrientation(LinearLayout.VERTICAL);
+        trafficCard.addView(trafficCards, matchWrap());
+        trafficCard.addView(text("تنبيه: صفر KB/s يعني عدم رصد نقل بيانات في لحظة القراءة، ولا يعني أن الجهاز غير متصل. إجماليات MB تراكمية بحسب عداد الراوتر وقد تبدأ من آخر تفعيل أو تصفير للإحصائيات.", 11, false, MUTED), matchWrap());
 
         gap(root, 10);
         LinearLayout tools = card(root);
@@ -231,7 +263,7 @@ public class MainActivity extends Activity {
         diagnosticView.setTextIsSelectable(true);
         diagnostics.addView(diagnosticView, matchWrap());
 
-        TextView footer = text("الإصدار 0.2.3: لوحة مشتركين، بحث وتصفية، وتحديث متتابع لقائمتي DHCP وWi-Fi. الحظر وتحديد السرعة غير مفعّلين بعد حتى نتحقق من نماذج الكتابة في الراوتر.", 12, true, MUTED);
+        TextView footer = text("الإصدار 0.2.5: لوحة المشتركين وقراءة Traffic Statistics. الحظر وتحديد السرعة غير مفعّلين بعد حتى نتحقق من نماذج الكتابة في الراوتر.", 12, true, MUTED);
         footer.setPadding(dp(4), dp(12), dp(4), dp(4));
         root.addView(footer, matchWrap());
 
@@ -295,6 +327,7 @@ public class MainActivity extends Activity {
                     if (webView != null && webView.getUrl() != null) {
                         inspectCurrentPage();
                         readDevicesFromPage();
+                        readTrafficStatisticsFromPage(false);
                     }
                 }, 850);
             }
@@ -327,6 +360,11 @@ public class MainActivity extends Activity {
         lastDevices = "";
         dhcpSnapshot.clear();
         wirelessSnapshot.clear();
+        trafficSnapshot.clear();
+        trafficSnapshotAt = 0L;
+        trafficSourcePath = "";
+        if (trafficCards != null) trafficCards.removeAllViews();
+        if (trafficSummaryView != null) trafficSummaryView.setText("لم تُقرأ إحصائيات حركة البيانات بعد.");
         hasDhcpSnapshot = false;
         hasWirelessSnapshot = false;
         dhcpSnapshotAt = 0L;
@@ -543,6 +581,116 @@ public class MainActivity extends Activity {
         });
     }
 
+    /**
+     * Read the QoS > Traffic Statistics table from the current page or any
+     * same-origin frame. This parser is separate from DHCP/Wi-Fi parsing
+     * because the traffic table is keyed by IP and has no MAC column.
+     */
+    private void readTrafficStatisticsFromPage(boolean announceIfMissing) {
+        if (webView == null || webView.getUrl() == null) {
+            if (announceIfMissing) toast("اتصل بالراوتر وسجّل الدخول أولاً.");
+            return;
+        }
+        String js = "(function(){" +
+                "function txt(e){return ((e&&(e.innerText||e.textContent))||'').replace(/\\u00a0/g,' ').replace(/\\s+/g,' ').trim();}" +
+                "function norm(s){return (s||'').toLowerCase().replace(/[^a-z0-9]/g,'');}" +
+                "function pathOf(d){try{return new URL(d.location.href).pathname;}catch(e){return '';}}" +
+                "function docs(){var a=[document],seen=[document];for(var i=0;i<a.length;i++){try{var fs=a[i].querySelectorAll('frame,iframe');for(var j=0;j<fs.length;j++){try{var d=fs[j].contentDocument;if(d&&d.documentElement&&seen.indexOf(d)<0){seen.push(d);a.push(d);}}catch(e){}}}catch(e){}}return a;}" +
+                "function find(h,part){for(var i=0;i<h.length;i++){if(norm(h[i]).indexOf(part)>=0)return i;}return -1;}" +
+                "function num(v){var m=String(v||'').replace(/,/g,'.').match(/-?\\d+(?:\\.\\d+)?/);return m?parseFloat(m[0]):0;}" +
+                "var ds=docs(),records=[],seen={},source='';" +
+                "for(var x=0;x<ds.length;x++){var d=ds[x],tables=d.querySelectorAll('table');" +
+                "for(var t=0;t<tables.length;t++){var rows=tables[t].querySelectorAll('tr'),headerAt=-1,headers=[];" +
+                "for(var r=0;r<rows.length;r++){var hs=Array.prototype.slice.call(rows[r].querySelectorAll('th,td')).map(txt),hn=hs.map(norm);" +
+                "var ip=hn.some(function(v){return v.indexOf('ipaddress')>=0;}),up=hn.some(function(v){return v.indexOf('uplinkrate')>=0;}),down=hn.some(function(v){return v.indexOf('downlinkrate')>=0;}),sent=hn.some(function(v){return v.indexOf('sentbytes')>=0;}),received=hn.some(function(v){return v.indexOf('receivedbytes')>=0;});" +
+                "if(ip&&up&&down&&sent&&received){headerAt=r;headers=hs;break;}}" +
+                "if(headerAt<0)continue;" +
+                "var ipI=find(headers,'ipaddress'),upI=find(headers,'uplinkrate'),downI=find(headers,'downlinkrate'),smI=find(headers,'sentmessage'),sbI=find(headers,'sentbytes'),rmI=find(headers,'receivedmessage'),rbI=find(headers,'receivedbytes');" +
+                "source=pathOf(d);" +
+                "for(var rr=headerAt+1;rr<rows.length;rr++){var cells=Array.prototype.slice.call(rows[rr].querySelectorAll('td')).map(txt);if(!cells.length)continue;" +
+                "var ipText=ipI>=0?(cells[ipI]||''):cells.join(' '),im=ipText.match(/(?:\\d{1,3}\\.){3}\\d{1,3}/);if(!im)continue;var addr=im[0];if(seen[addr])continue;seen[addr]=1;" +
+                "records.push({ip:addr,uplinkKBps:num(upI>=0?cells[upI]:''),downlinkKBps:num(downI>=0?cells[downI]:''),sentMessages:num(smI>=0?cells[smI]:''),sentMB:num(sbI>=0?cells[sbI]:''),receivedMessages:num(rmI>=0?cells[rmI]:''),receivedMB:num(rbI>=0?cells[rbI]:''),raw:cells.join(' | '),sourcePath:source});}}}" +
+                "if(records.length){TendaBridge.trafficStatistics(JSON.stringify(records),source);return records.length;}return 0;})()";
+        webView.evaluateJavascript(js, result -> {
+            if (result == null || "null".equals(result) || "0".equals(result)) {
+                if (announceIfMissing) {
+                    status("لم أتعرف على جدول Traffic Statistics. افتح QoS ثم Traffic Statistics داخل نافذة الراوتر، وانتظر تحميل الجدول، ثم أعد القراءة.");
+                    toast("لم أجد جدول Traffic Statistics في الصفحة الحالية. استخدم زر فحص الصفحة لنسخ التقرير.");
+                }
+            }
+        });
+    }
+
+    private void renderTrafficStatistics(String json, String sourcePath) {
+        try {
+            JSONArray arr = new JSONArray(json);
+            trafficSnapshot.clear();
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject item = arr.optJSONObject(i);
+                if (item == null) continue;
+                String ip = item.optString("ip", "").trim();
+                if (ip.matches("\\d{1,3}(\\.\\d{1,3}){3}")) trafficSnapshot.put(ip, item);
+            }
+            trafficSnapshotAt = System.currentTimeMillis();
+            trafficSourcePath = sourcePath == null ? "" : sourcePath;
+            renderTrafficCards();
+            status("تمت قراءة Traffic Statistics: " + trafficSnapshot.size() + " عنوان IP.");
+        } catch (JSONException e) {
+            if (trafficSummaryView != null) trafficSummaryView.setText("تعذر تحليل جدول Traffic Statistics. انسخ تقرير التشخيص وأرسله.");
+        }
+    }
+
+    private void renderTrafficCards() {
+        if (trafficSummaryView == null || trafficCards == null) return;
+        trafficCards.removeAllViews();
+        if (trafficSnapshot.isEmpty()) {
+            trafficSummaryView.setText("لم يتم العثور على سجلات Traffic Statistics.");
+            return;
+        }
+        double totalUp = 0, totalDown = 0, totalSent = 0, totalReceived = 0;
+        for (JSONObject item : trafficSnapshot.values()) {
+            totalUp += item.optDouble("uplinkKBps", 0);
+            totalDown += item.optDouble("downlinkKBps", 0);
+            totalSent += item.optDouble("sentMB", 0);
+            totalReceived += item.optDouble("receivedMB", 0);
+        }
+        trafficSummaryView.setText("عدد عناوين IP: " + trafficSnapshot.size() +
+                "\nمجموع الرفع الحالي: " + String.format(Locale.US, "%.2f", totalUp) + " KB/s" +
+                "\nمجموع التنزيل الحالي: " + String.format(Locale.US, "%.2f", totalDown) + " KB/s" +
+                "\nإجمالي Sent: " + String.format(Locale.US, "%.2f", totalSent) + " MB" +
+                "\nإجمالي Received: " + String.format(Locale.US, "%.2f", totalReceived) + " MB" +
+                "\nآخر قراءة: " + formatTime(trafficSnapshotAt) + " | الصفحة: " + trafficSourcePath);
+
+        for (JSONObject item : trafficSnapshot.values()) {
+            String ip = item.optString("ip", "");
+            JSONObject dhcp = null;
+            for (JSONObject candidate : dhcpSnapshot.values()) {
+                if (ip.equals(candidate.optString("ip", ""))) { dhcp = candidate; break; }
+            }
+            String name = dhcp == null ? "جهاز غير مربوط بسجل DHCP" : displayName(dhcp.optString("mac", ""), dhcp);
+            String mac = dhcp == null ? "MAC غير متاح في آخر قراءة DHCP" : dhcp.optString("mac", "غير متاح");
+
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.VERTICAL);
+            row.setPadding(dp(11), dp(9), dp(11), dp(9));
+            android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+            bg.setColor(Color.WHITE);
+            bg.setCornerRadius(dp(10));
+            bg.setStroke(dp(1), BORDER);
+            row.setBackground(bg);
+            row.addView(text(name + "  |  " + ip, 14, true, DARK), matchWrap());
+            row.addView(text("MAC: " + mac, 11, false, MUTED), matchWrap());
+            row.addView(text("Upload: " + String.format(Locale.US, "%.2f", item.optDouble("uplinkKBps", 0)) + " KB/s" +
+                    "     Download: " + String.format(Locale.US, "%.2f", item.optDouble("downlinkKBps", 0)) + " KB/s", 12, true, DARK), matchWrap());
+            row.addView(text("Sent: " + String.format(Locale.US, "%.2f", item.optDouble("sentMB", 0)) + " MB" +
+                    "     Received: " + String.format(Locale.US, "%.2f", item.optDouble("receivedMB", 0)) + " MB", 12, false, MUTED), matchWrap());
+            row.addView(text("Sent packets: " + String.format(Locale.US, "%.0f", item.optDouble("sentMessages", 0)) +
+                    "     Received packets: " + String.format(Locale.US, "%.0f", item.optDouble("receivedMessages", 0)), 11, false, MUTED), matchWrap());
+            trafficCards.addView(row, matchWrap());
+            gap(trafficCards, 6);
+        }
+    }
+
     private void inspectCurrentPage() {
         if (webView.getUrl() == null) return;
         String js = "(function(){" +
@@ -553,7 +701,7 @@ public class MainActivity extends Activity {
                 "for(var x=0;x<ds.length;x++){var d=ds[x],framePath='';try{framePath=pathOnly(d.location.href);}catch(e){framePath='frame';}o.frames.push(framePath);" +
                 "var as=d.querySelectorAll('a');for(var i=0;i<as.length&&o.links.length<120;i++){var a=as[i],tx=txt(a);if(tx)o.links.push({text:tx,href:pathOnly(a.href||'')});}" +
                 "var fs=d.querySelectorAll('form');for(var f=0;f<fs.length&&o.forms.length<30;f++){var fm=fs[f],ob={frame:framePath,action:pathOnly(fm.action||''),method:fm.method||'',onSubmit:(fm.getAttribute('onsubmit')||'').slice(0,300),fields:[]},cs=fm.querySelectorAll('input,select,textarea,button');for(var k=0;k<cs.length&&ob.fields.length<100;k++){var c=cs[k],typ=(c.type||'').toLowerCase(),nm=(c.name||'')+' '+(c.id||''),secret=typ==='password'||typ==='hidden'||/(pass|token|cookie|auth|session|key|csrf|stok)/i.test(nm),z={tag:c.tagName.toLowerCase(),type:typ,name:c.name||'',id:c.id||'',value:secret?'[محجوب]':(c.value||''),text:txt(c),onClick:(c.getAttribute('onclick')||'').slice(0,300)};if(c.tagName==='SELECT'){z.options=[];for(var n=0;n<c.options.length&&n<40;n++)z.options.push({text:c.options[n].text,value:c.options[n].value});}ob.fields.push(z);}o.forms.push(ob);}" +
-                "var ts=d.querySelectorAll('table');for(var t=0;t<ts.length&&o.tables.length<40;t++){var tab=ts[t],rs=tab.querySelectorAll('tr'),headers=[],headerAt=-1,preview=[];for(var r=0;r<rs.length;r++){var cc=Array.prototype.slice.call(rs[r].querySelectorAll('th,td')).map(txt);var joined=cc.join(' ').toLowerCase();if((joined.indexOf('host name')>=0&&joined.indexOf('lease time')>=0)||(joined.indexOf('mac address')>=0&&joined.indexOf('bandwidth')>=0)){headers=cc;headerAt=r;break;}}if(headerAt<0){var hs=tab.querySelectorAll('th');for(var h=0;h<hs.length&&h<20;h++)headers.push(txt(hs[h]));}if(headerAt>=0){for(var pr=headerAt+1;pr<rs.length&&preview.length<5;pr++){var vals=Array.prototype.slice.call(rs[pr].querySelectorAll('td')).map(txt);if(vals.length)preview.push(vals);}}o.tables.push({frame:framePath,headers:headers,rowCount:rs.length,previewRows:preview});}}" +
+                "var ts=d.querySelectorAll('table');for(var t=0;t<ts.length&&o.tables.length<40;t++){var tab=ts[t],rs=tab.querySelectorAll('tr'),headers=[],headerAt=-1,preview=[];for(var r=0;r<rs.length;r++){var cc=Array.prototype.slice.call(rs[r].querySelectorAll('th,td')).map(txt);var joined=cc.join(' ').toLowerCase();if((joined.indexOf('host name')>=0&&joined.indexOf('lease time')>=0)||(joined.indexOf('mac address')>=0&&joined.indexOf('bandwidth')>=0)||(joined.indexOf('ip address')>=0&&joined.indexOf('uplink')>=0&&joined.indexOf('downlink')>=0)){headers=cc;headerAt=r;break;}}if(headerAt<0&&rs.length>0){headers=Array.prototype.slice.call(rs[0].querySelectorAll('th,td')).map(txt);headerAt=0;}for(var pr=headerAt+1;pr<rs.length&&preview.length<5;pr++){var vals=Array.prototype.slice.call(rs[pr].querySelectorAll('th,td')).map(txt);if(vals.length)preview.push(vals);}o.tables.push({frame:framePath,headers:headers,rowCount:rs.length,previewRows:preview});}}" +
                 "TendaBridge.diagnostic(JSON.stringify(o));return 'ok';})()";
         webView.evaluateJavascript(js, null);
     }
@@ -837,6 +985,11 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void genericDevices(String json) {
             runOnUiThread(() -> renderGenericDevices(json));
+        }
+
+        @JavascriptInterface
+        public void trafficStatistics(String json, String sourcePath) {
+            runOnUiThread(() -> renderTrafficStatistics(json, sourcePath));
         }
 
         @JavascriptInterface
