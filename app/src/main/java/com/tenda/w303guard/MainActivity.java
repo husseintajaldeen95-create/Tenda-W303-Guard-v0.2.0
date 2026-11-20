@@ -81,6 +81,10 @@ public class MainActivity extends Activity {
     private String lastDiagnostic = "";
     private String lastDevices = "";
     private final Map<String, JSONObject> dhcpSnapshot = new LinkedHashMap<>();
+    // Recent DHCP associations are retained separately so a wireless-only scan
+    // can still show the last known IP without presenting it as a live lease.
+    private final Map<String, JSONObject> dhcpHistory = new LinkedHashMap<>();
+    private static final long DHCP_HISTORY_MAX_AGE_MS = 24L * 60L * 60L * 1000L;
     private final Map<String, JSONObject> wirelessSnapshot = new LinkedHashMap<>();
     // Traffic Statistics is keyed by router-reported IP address; DHCP is used
     // only to enrich the row with the most recent known name and MAC address.
@@ -111,6 +115,8 @@ public class MainActivity extends Activity {
     public void onCreate(Bundle state) {
         super.onCreate(state);
         preferences = getSharedPreferences("tenda_w303_guard", MODE_PRIVATE);
+        activeHost = preferences.getString("router_ip", DEFAULT_ROUTER);
+        loadDhcpHistory();
         buildUi();
         configureWebView();
     }
@@ -155,7 +161,8 @@ public class MainActivity extends Activity {
         nav.addView(text("اختصارات صفحات الراوتر", 15, true, DARK), matchWrap());
         addNavButton(nav, "قائمة أجهزة DHCP", () -> openRouterSection("Advanced", "DHCP Client List"));
         addNavButton(nav, "الأجهزة اللاسلكية المتصلة", () -> openRouterSection("Wireless", "Wireless Connection Status"));
-        addNavButton(nav, "تصفية MAC وجدولة الإنترنت", () -> openRouterSection("Security", "MAC Address Filter Settings"));
+        addNavButton(nav, "السماح أو منع اتصال Wi-Fi", () -> openRouterSection("Wireless", "Access Control"));
+        addNavButton(nav, "تصفية MAC وجدولة الإنترنت", () -> openRouterSection("Security", "MAC Address Filter"));
         addNavButton(nav, "ضبط وقت الراوتر", () -> openRouterSection("Tools", "Time Settings"));
         addNavButton(nav, "QoS وتحديد السرعة", () -> openRouterSection("QoS", "Bandwidth Control"));
         addNavButton(nav, "QoS - Traffic Statistics", () -> openRouterSection("QoS", "Traffic Statistics"));
@@ -223,7 +230,7 @@ public class MainActivity extends Activity {
                 "هذا شرح للقاعدة وليس تطبيقاً تلقائياً لها؛ اختبر جهازاً واحداً أولاً، ولا تستخدم 00:00–00:00 لأنها موثقة كقاعدة تعمل طوال 24 ساعة.",
                 13, false, MUTED), matchWrap());
         schedule.addView(text(
-                "مهم: لا تخلط بين Wireless Access Control (منع الاتصال بالواي فاي) وبين MAC Address Filter ضمن Security settings (التحكم بوصول الجهاز إلى الإنترنت).",
+                "مهم: Wireless > Access Control يتحكم بمن يستطيع الانضمام إلى شبكة Wi-Fi. أما Security > MAC Address Filter فيتحكم بوصول الجهاز إلى الإنترنت وفق MAC والوقت والأيام. هاتان وظيفتان منفصلتان.",
                 13, true, DARK), matchWrap());
 
         gap(root, 10);
@@ -309,7 +316,7 @@ public class MainActivity extends Activity {
         diagnosticView.setTextIsSelectable(true);
         diagnostics.addView(diagnosticView, matchWrap());
 
-        TextView footer = text("الإصدار 0.2.6: المراقبة شبه اللحظية لسرعات المشتركين. الحظر وتحديد السرعة غير مفعّلين بعد حتى نتحقق من نماذج الكتابة في الراوتر.", 12, true, MUTED);
+        TextView footer = text("الإصدار 0.2.7: إصلاح التنقل وربط الأجهزة مع المراقبة شبه اللحظية لسرعات المشتركين. الحظر وتحديد السرعة غير مفعّلين بعد حتى نتحقق من نماذج الكتابة في الراوتر.", 12, true, MUTED);
         footer.setPadding(dp(4), dp(12), dp(4), dp(4));
         root.addView(footer, matchWrap());
 
@@ -368,11 +375,12 @@ public class MainActivity extends Activity {
                 pageView.setText("الصفحة الحالية: " + url);
                 if (!isAllowedRouterUri(Uri.parse(url))) return;
                 status("تم تحميل صفحة الراوتر. إذا ظهرت شاشة الدخول، سجّل الدخول من داخلها.");
-                // Read supported tables automatically after the router page settles.
+                // Inspect the loaded router page and refresh Traffic Statistics if
+                // its table is present. Device lists are read explicitly by the page
+                // shortcuts or by the sequential DHCP/Wi-Fi scan to avoid racing frames.
                 handler.postDelayed(() -> {
                     if (webView != null && webView.getUrl() != null) {
                         inspectCurrentPage();
-                        readDevicesFromPage();
                         readTrafficStatisticsFromPage(false);
                     }
                 }, 850);
@@ -403,6 +411,8 @@ public class MainActivity extends Activity {
         }
         activeHost = ip;
         preferences.edit().putString("router_ip", ip).apply();
+        dhcpHistory.clear();
+        loadDhcpHistory();
         lastDiagnostic = "";
         lastDevices = "";
         dhcpSnapshot.clear();
@@ -440,43 +450,79 @@ public class MainActivity extends Activity {
         }
     }
 
+    private String routerPagePath(String parentLabel, String childLabel) {
+        if ("Advanced".equalsIgnoreCase(parentLabel) && "DHCP Client List".equalsIgnoreCase(childLabel)) return "/lan_dhcp_clients.asp";
+        if ("Wireless".equalsIgnoreCase(parentLabel) && "Wireless Connection Status".equalsIgnoreCase(childLabel)) return "/wireless_state.asp";
+        if ("Wireless".equalsIgnoreCase(parentLabel) && "Access Control".equalsIgnoreCase(childLabel)) return "/wireless_filter.asp";
+        if ("Security".equalsIgnoreCase(parentLabel) && ("MAC Address Filter Settings".equalsIgnoreCase(childLabel)
+                || "MAC Address Filter".equalsIgnoreCase(childLabel))) return "/firewall_macfilter.asp";
+        if ("Tools".equalsIgnoreCase(parentLabel) && "Time Settings".equalsIgnoreCase(childLabel)) return "/system_time.asp";
+        if ("QoS".equalsIgnoreCase(parentLabel) && "Bandwidth Control".equalsIgnoreCase(childLabel)) return "/net_tc.asp";
+        if ("QoS".equalsIgnoreCase(parentLabel) && "Traffic Statistics".equalsIgnoreCase(childLabel)) return "/sys_iptAccount.asp";
+        return null;
+    }
+
     private void openRouterSection(String parentLabel, String childLabel) {
         if (webView == null || webView.getUrl() == null) {
             toast("اتصل بالراوتر وسجّل الدخول أولاً.");
             return;
         }
-        // The W303R QoS menu defaults to Bandwidth Control. Traffic Statistics
-        // is a sibling page in the same content frame, so navigate to its
-        // verified firmware path after opening QoS instead of relying only on
-        // a text click that may race the frame navigation.
-        if ("QoS".equalsIgnoreCase(parentLabel) && "Traffic Statistics".equalsIgnoreCase(childLabel)) {
-            status("أفتح QoS ثم صفحة Traffic Statistics...");
-            clickRouterLabel(parentLabel, parentFound -> {
-                if (!parentFound) {
-                    status("لم أجد تبويب QoS. افتحه يدوياً ثم أعد المحاولة.");
-                    return;
-                }
-                handler.postDelayed(() -> navigateRouterContentPath("/sys_iptAccount.asp", navigated -> {
-                    if (navigated) {
-                        status("تم فتح QoS > Traffic Statistics.");
-                        handler.postDelayed(() -> readTrafficStatisticsFromPage(false), 1000);
-                    } else {
-                        clickRouterLabel(childLabel, childFound -> {
-                            if (childFound) status("تم فتح QoS > Traffic Statistics.");
-                            else status("فُتح QoS، لكن تعذر فتح Traffic Statistics تلقائياً. اخترها يدوياً من القائمة الجانبية.");
-                        });
-                    }
-                }), 1200);
-            });
+        final String targetPath = routerPagePath(parentLabel, childLabel);
+        if (targetPath == null) {
+            openRouterSectionByMenu(parentLabel, childLabel);
             return;
         }
-        clickRouterLabel(parentLabel, parentFound -> handler.postDelayed(() ->
-                clickRouterLabel(childLabel, childFound -> {
-                    if (parentFound && childFound) status("تم فتح " + parentLabel + " ثم " + childLabel + ".");
-                    else if (parentFound) status("فُتح القسم الرئيسي، لكن لم أجد " + childLabel + ". افتحه يدوياً ثم أعد التشخيص.");
-                    else status("لم أجد رابط " + parentLabel + ". تأكد من تسجيل الدخول أو افتح القسم يدوياً.");
-                }), 1200));
-        status("أحاول فتح: " + parentLabel + " ثم " + childLabel + " — تأكد من تسجيل الدخول.");
+        status("أفتح " + parentLabel + " > " + childLabel + " بالمسار المحلي...");
+        navigateRouterContentPath(targetPath, navigated -> {
+            if (!navigated) {
+                openRouterSectionByMenu(parentLabel, childLabel);
+                return;
+            }
+            handler.postDelayed(() -> verifyRouterContentPath(targetPath, 0, verified -> {
+                if (!verified) {
+                    openRouterSectionByMenu(parentLabel, childLabel);
+                    return;
+                }
+                status("تم فتح " + childLabel + ". جارٍ فحص محتوى الصفحة...");
+                inspectCurrentPage();
+                if ("DHCP Client List".equalsIgnoreCase(childLabel)
+                        || "Wireless Connection Status".equalsIgnoreCase(childLabel)) {
+                    readDevicesFromPage();
+                } else if ("Traffic Statistics".equalsIgnoreCase(childLabel)) {
+                    readTrafficStatisticsFromPage(true);
+                }
+            }), 650);
+        });
+    }
+
+    private void openRouterSectionByMenu(String parentLabel, String childLabel) {
+        clickRouterLabel(parentLabel, parentFound -> {
+            if (!parentFound) {
+                status("لم أجد تبويب " + parentLabel + ". تأكد من تسجيل الدخول ثم أعد المحاولة.");
+                return;
+            }
+            handler.postDelayed(() -> clickRouterLabelAny(childLabelAliases(childLabel), 0, childFound -> {
+                if (childFound) {
+                    status("تم فتح " + childLabel + " من قائمة الراوتر.");
+                    handler.postDelayed(() -> {
+                        inspectCurrentPage();
+                        if ("DHCP Client List".equalsIgnoreCase(childLabel)
+                                || "Wireless Connection Status".equalsIgnoreCase(childLabel)) readDevicesFromPage();
+                        else if ("Traffic Statistics".equalsIgnoreCase(childLabel)) readTrafficStatisticsFromPage(true);
+                    }, 900);
+                } else {
+                    status("فُتح " + parentLabel + " لكن لم أجد الصفحة الفرعية " + childLabel + ". افتحها يدوياً ثم أعد الفحص.");
+                }
+            }), 850);
+        });
+    }
+
+    private String[] childLabelAliases(String childLabel) {
+        if ("MAC Address Filter".equalsIgnoreCase(childLabel) || "MAC Address Filter Settings".equalsIgnoreCase(childLabel)) {
+            return new String[]{"MAC Address Filter Settings", "MAC Address Filter", "MAC Filter"};
+        }
+        if ("Time Settings".equalsIgnoreCase(childLabel)) return new String[]{"Time Settings", "Time"};
+        return new String[]{childLabel};
     }
 
     private interface BooleanResult { void onResult(boolean value); }
@@ -490,6 +536,29 @@ public class MainActivity extends Activity {
                 "for(var j=0;j<es.length;j++){var e=es[j],t=norm((e.innerText||e.textContent||e.value||'')+' '+(e.title||'')+' '+(e.alt||''));" +
                 "if(t===q||t.indexOf(q)>=0){var target=e.closest?e.closest('a,button,[onclick],[role=button]'):null;if(!target)target=e;try{target.scrollIntoView({block:'center'});}catch(x){};target.click();return true;}}}return false;})()";
         webView.evaluateJavascript(script, result -> callback.onResult("true".equals(result)));
+    }
+
+    private void clickRouterLabelAny(String[] labels, int index, BooleanResult callback) {
+        if (labels == null || index >= labels.length) {
+            callback.onResult(false);
+            return;
+        }
+        clickRouterLabel(labels[index], found -> {
+            if (found) callback.onResult(true);
+            else clickRouterLabelAny(labels, index + 1, callback);
+        });
+    }
+
+    private void verifyRouterContentPath(String targetPath, int attempt, BooleanResult callback) {
+        String js = "(function(){" +
+                "var target=" + JSONObject.quote(targetPath) + ";var found=false;" +
+                "function walk(w){try{var p=new URL(w.location.href).pathname;if(p===target)found=true;for(var i=0;i<w.frames.length&&!found;i++)walk(w.frames[i]);}catch(e){}}" +
+                "walk(window);return found;})()";
+        webView.evaluateJavascript(js, result -> {
+            if ("true".equals(result)) callback.onResult(true);
+            else if (attempt < 3) handler.postDelayed(() -> verifyRouterContentPath(targetPath, attempt + 1, callback), 550);
+            else callback.onResult(false);
+        });
     }
 
     /**
@@ -507,49 +576,68 @@ public class MainActivity extends Activity {
         }
         scanInProgress = true;
         if (scanAllButton != null) scanAllButton.setEnabled(false);
-        if (scanMetaView != null) scanMetaView.setText("المرحلة 1 من 2: فتح قائمة DHCP...");
+        if (scanMetaView != null) scanMetaView.setText("المرحلة 1 من 2: فتح قائمة DHCP مباشرة...");
         status("بدأ تحديث القائمتين. لن يتم تغيير أي إعداد في الراوتر.");
-        clickRouterLabel("Advanced", advancedFound -> {
-            if (!advancedFound) {
-                finishFullScan(false, "لم أجد تبويب Advanced. افتحه يدوياً ثم أعد الفحص.");
+        navigateRouterContentPath("/lan_dhcp_clients.asp", navigated -> {
+            if (!navigated) {
+                finishFullScan(false, "تعذر الوصول إلى إطار DHCP. افتح Advanced ثم DHCP Client List يدوياً.");
                 return;
             }
-            handler.postDelayed(() -> clickRouterLabel("DHCP Client List", found -> {
-                if (!found) {
-                    finishFullScan(false, "فُتح Advanced، لكن لم أجد رابط DHCP Client List.");
+            handler.postDelayed(() -> verifyRouterContentPath("/lan_dhcp_clients.asp", 0, verified -> {
+                if (!verified) {
+                    finishFullScan(false, "لم أتحقق من فتح DHCP Client List. افتح الصفحة من قائمة Advanced ثم أعد الفحص.");
                     return;
                 }
                 handler.postDelayed(() -> readDevicesFromPage(() -> {
                     if (scanMetaView != null) scanMetaView.setText("اكتملت قراءة DHCP. المرحلة 2 من 2: فتح قائمة Wi-Fi...");
-                    handler.postDelayed(this::scanWirelessStage, 650);
-                }), 1100);
-            }), 1200);
+                    handler.postDelayed(this::scanWirelessStage, 450);
+                }), 700);
+            }), 550);
         });
     }
 
     private void scanWirelessStage() {
-        // Firmware V5.07.46_en exposes the wireless table at this verified path.
-        // The old label-click sequence could fail because the submenu is rendered
-        // inside the router's frame and may not be ready when the parent tab changes.
-        // Navigate the existing content frame directly instead of relying on UI text.
         if (scanMetaView != null) {
-            scanMetaView.setText("اكتملت قراءة DHCP. جارٍ فتح صفحة Wireless Connection Status مباشرة...");
+            scanMetaView.setText("اكتملت قراءة DHCP. جارٍ فتح صفحة Wireless Connection Status...");
         }
         navigateRouterContentPath("/wireless_state.asp", navigated -> {
             if (!navigated) {
-                // Last-resort route: load the verified local page directly in the same
-                // WebView session. This keeps the router cookies/session intact.
-                status("لم أجد إطار المحتوى؛ أفتح صفحة Wireless Connection Status بالمسار المحلي المباشر.");
-                webView.loadUrl("http://" + activeHost + "/wireless_state.asp");
-            } else {
-                status("تم توجيه إطار الراوتر إلى Wireless Connection Status.");
+                openWirelessStatusByMenu();
+                return;
             }
-            handler.postDelayed(() -> readDevicesFromPage(() -> {
-                boolean complete = hasDhcpSnapshot && hasWirelessSnapshot;
-                finishFullScan(complete, complete
-                        ? "اكتملت قراءة DHCP وWi-Fi ودمج الأجهزة بنجاح."
-                        : "قُرئت DHCP، لكن لم تكتمل قراءة Wi-Fi. افتح Wireless Connection Status يدوياً ثم أعد القراءة.");
-            }), navigated ? 1400 : 1900);
+            handler.postDelayed(() -> verifyRouterContentPath("/wireless_state.asp", 0, verified -> {
+                if (verified) {
+                    status("تم فتح Wireless Connection Status. جارٍ قراءة الأجهزة...");
+                    handler.postDelayed(() -> readWirelessAndFinishScan(), 650);
+                } else {
+                    openWirelessStatusByMenu();
+                }
+            }), 550);
+        });
+    }
+
+    private void openWirelessStatusByMenu() {
+        clickRouterLabel("Wireless", parentFound -> {
+            if (!parentFound) {
+                finishFullScan(false, "تعذر فتح قسم Wireless. افتحه يدوياً ثم أعد الفحص.");
+                return;
+            }
+            handler.postDelayed(() -> clickRouterLabel("Wireless Connection Status", childFound -> {
+                if (!childFound) {
+                    finishFullScan(false, "تعذر فتح Wireless Connection Status. افتحها يدوياً ثم أعد الفحص.");
+                    return;
+                }
+                handler.postDelayed(this::readWirelessAndFinishScan, 1000);
+            }), 800);
+        });
+    }
+
+    private void readWirelessAndFinishScan() {
+        readDevicesFromPage(() -> {
+            boolean complete = hasDhcpSnapshot && hasWirelessSnapshot;
+            finishFullScan(complete, complete
+                    ? "اكتملت قراءة DHCP وWi-Fi ودمج الأجهزة بنجاح."
+                    : "لم تكتمل قراءة إحدى القائمتين. راجع آخر قراءة DHCP وWi-Fi ثم أعد الفحص.");
         });
     }
 
@@ -561,19 +649,18 @@ public class MainActivity extends Activity {
     private void navigateRouterContentPath(String targetPath, BooleanResult callback) {
         String js = "(function(){" +
                 "var target=" + JSONObject.quote(targetPath) + ";" +
-                "function path(u){try{return new URL(u,location.href).pathname;}catch(e){return '';}}" +
-                "var seen=[];" +
-                "function walk(w){try{for(var i=0;i<w.frames.length;i++){var f=w.frames[i],p='';" +
-                "try{p=path(f.location.href);}catch(e){}" +
-                "if(p===target)return true;" +
-                "if(p==='/lan_dhcp_clients.asp'||p==='/wireless_basic.asp'||p==='/wireless_state.asp'||p==='/net_tc.asp'){" +
-                "try{f.location.href=target;return true;}catch(e){}}" +
-                "if(walk(f))return true;}}catch(e){}return false;}" +
-                "if(walk(window))return true;" +
-                "var docs=[document];for(var x=0;x<docs.length;x++){try{var fs=docs[x].querySelectorAll('frame,iframe');" +
-                "for(var j=0;j<fs.length;j++){try{var d=fs[j].contentDocument;if(d&&docs.indexOf(d)<0)docs.push(d);}catch(e){}}" +
-                "var as=docs[x].querySelectorAll('a');for(var k=0;k<as.length;k++){if(path(as[k].href)===target){as[k].click();return true;}}}catch(e){}}" +
-                "return false;})()";
+                "function path(w){try{return new URL(w.location.href).pathname;}catch(e){return '';}}" +
+                "function full(){return location.protocol+'//'+location.host+target;}" +
+                "var wins=[];" +
+                "function walk(w,depth){try{wins.push({w:w,depth:depth,path:path(w)});for(var i=0;i<w.frames.length;i++){try{walk(w.frames[i],depth+1);}catch(e){}}}catch(e){}}" +
+                "walk(window,0);" +
+                "for(var i=0;i<wins.length;i++){if(wins[i].path===target)return true;}" +
+                "for(var i=0;i<wins.length;i++){try{var d=wins[i].w.document,as=d.querySelectorAll('a[href]');for(var j=0;j<as.length;j++){try{if(new URL(as[j].href,location.href).pathname===target){as[j].click();return true;}}catch(e){}}}catch(e){}}" +
+                "var candidates=wins.filter(function(x){return x.depth>0&&x.path!=='/advance.asp'&&x.path!=='/index.asp'&&x.path!=='/';});" +
+                "candidates.sort(function(a,b){return b.depth-a.depth;});" +
+                "if(candidates.length){try{candidates[0].w.location.href=full();return true;}catch(e){}}" +
+                "var nested=wins.filter(function(x){return x.depth>0;});if(nested.length){try{nested[nested.length-1].w.location.href=full();return true;}catch(e){}}" +
+                "try{window.location.href=full();return true;}catch(e){}return false;})()";
         webView.evaluateJavascript(js, result -> callback.onResult("true".equals(result)));
     }
 
@@ -633,11 +720,12 @@ public class MainActivity extends Activity {
                 "for(var rr=headerAt+1;rr<rows.length;rr++){var row=rows[rr];if(row.querySelector('th'))continue;var cells=Array.prototype.slice.call(row.querySelectorAll('td')).map(cellText);if(!cells.length)continue;var raw=cells.join(' | '),mac=macValue(macI>=0?cells[macI]:raw);if(!mac)continue;" +
                 "if(kind==='dhcp'){if(seenD[mac])continue;seenD[mac]=1;var ip=ipI>=0?(cells[ipI]||''):'';if(!/^\\d{1,3}(?:\\.\\d{1,3}){3}$/.test(ip)){var im=raw.match(/(?:\\d{1,3}\\.){3}\\d{1,3}/);ip=im?im[0]:'';}var nm=nameI>=0?(cells[nameI]||''):'';var lease=leaseI>=0?(cells[leaseI]||''):'';dhcp.push({mac:mac,ip:ip,name:nm,lease:lease,sourcePath:pathOf(d),raw:raw});}" +
                 "else{if(seenW[mac])continue;seenW[mac]=1;var bw=bwI>=0?(cells[bwI]||''):'';if(!bw){for(var z=0;z<cells.length;z++){if(/^\\d{1,3}\\s*M$/i.test(cells[z])){bw=cells[z].toUpperCase();break;}}}wifi.push({mac:mac,bandwidth:bw,sourcePath:pathOf(d),raw:raw});}}}}" +
-                "if(!foundD&&!foundW){for(var x=0;x<docs.length;x++){var ts=docs[x].querySelectorAll('table');for(var t=0;t<ts.length;t++){var rs=ts[t].querySelectorAll('tr');for(var r=0;r<rs.length;r++){var cells=Array.prototype.slice.call(rs[r].querySelectorAll('th,td')).map(cellText),raw=cells.join(' | '),mac=macValue(raw);if(!mac||seenG[mac])continue;seenG[mac]=1;var ipm=raw.match(/(?:\\d{1,3}\\.){3}\\d{1,3}/);generic.push({mac:mac,ip:ipm?ipm[0]:'',name:cells.length?cells[0]:'',raw:raw,sourcePath:pathOf(docs[x])});}}}}" +
+                "var onDeviceListPage=docs.some(function(d){var p=pathOf(d);return p.indexOf('/lan_dhcp_clients.asp')>=0||p.indexOf('/wireless_state.asp')>=0;});" +
+                "if(!foundD&&!foundW&&onDeviceListPage){for(var x=0;x<docs.length;x++){var ts=docs[x].querySelectorAll('table');for(var t=0;t<ts.length;t++){var rs=ts[t].querySelectorAll('tr');for(var r=0;r<rs.length;r++){var cells=Array.prototype.slice.call(rs[r].querySelectorAll('th,td')).map(cellText),raw=cells.join(' | '),mac=macValue(raw);if(!mac||seenG[mac])continue;seenG[mac]=1;var ipm=raw.match(/(?:\\d{1,3}\\.){3}\\d{1,3}/);generic.push({mac:mac,ip:ipm?ipm[0]:'',name:cells.length?cells[0]:'',raw:raw,sourcePath:pathOf(docs[x])});}}}}" +
                 "var count=dhcp.length+wifi.length+generic.length;" +
                 "if(foundD&&(dhcp.length>0||attempt>=4))TendaBridge.clients(JSON.stringify(dhcp));" +
                 "if(foundW&&(wifi.length>0||attempt>=4))TendaBridge.wirelessDevices(JSON.stringify(wifi));" +
-                "if(!foundD&&!foundW&&(generic.length>0||attempt>=4))TendaBridge.genericDevices(JSON.stringify(generic));" +
+                "if(!foundD&&!foundW&&onDeviceListPage&&(generic.length>0||attempt>=4))TendaBridge.genericDevices(JSON.stringify(generic));" +
                 "if(count>0||attempt>=4)TendaBridge.readResult(dhcp.length,wifi.length,generic.length,foundD,foundW);" +
                 "return count;})()";
         if (attempt == 0) status("أبحث عن جداول الأجهزة في الصفحة والإطارات الداخلية...");
@@ -882,10 +970,8 @@ public class MainActivity extends Activity {
 
         for (JSONObject item : trafficSnapshot.values()) {
             String ip = item.optString("ip", "");
-            JSONObject dhcp = null;
-            for (JSONObject candidate : dhcpSnapshot.values()) {
-                if (ip.equals(candidate.optString("ip", ""))) { dhcp = candidate; break; }
-            }
+            JSONObject dhcp = knownDhcpForIp(ip);
+            boolean historicalDhcp = dhcp != null && !dhcpSnapshot.containsKey(dhcp.optString("mac", ""));
             String name = dhcp == null ? "جهاز غير مربوط بسجل DHCP" :
                     displayName(dhcp.optString("mac", ""), dhcp);
             String mac = dhcp == null ? "MAC غير متاح في آخر قراءة DHCP" :
@@ -904,7 +990,7 @@ public class MainActivity extends Activity {
             row.setBackground(bg);
 
             row.addView(text(name + "  |  " + ip, 15, true, DARK), matchWrap());
-            row.addView(text("MAC: " + mac, 11, false, MUTED), matchWrap());
+            row.addView(text("MAC: " + mac + (historicalDhcp ? " (آخر سجل DHCP معروف)" : ""), 11, false, MUTED), matchWrap());
             row.addView(text(active ? "حركة بيانات مرصودة الآن" : "لا يوجد نقل بيانات في لحظة القراءة",
                     11, true, active ? Color.rgb(22, 128, 70) : MUTED), matchWrap());
 
@@ -989,21 +1075,104 @@ public class MainActivity extends Activity {
     private void updateDhcpSnapshot(String json) {
         try {
             JSONArray arr = new JSONArray(json);
-            dhcpSnapshot.clear();
+            if (arr.length() == 0) {
+                // An empty/early DOM read must not erase a previously verified lease map.
+                status("لم تحتوِ قراءة DHCP الحالية على سجلات؛ احتفظت بآخر ربط معروف للأجهزة.");
+                return;
+            }
+            long now = System.currentTimeMillis();
+            Map<String, JSONObject> fresh = new LinkedHashMap<>();
             for (int i = 0; i < arr.length(); i++) {
                 JSONObject item = arr.optJSONObject(i);
                 if (item == null) continue;
                 String mac = MacAddress.normalize(item.optString("mac", ""));
                 if (mac.isEmpty()) continue;
-                dhcpSnapshot.put(mac, item);
+                JSONObject record = new JSONObject(item.toString());
+                record.put("mac", mac);
+                record.put("seenAt", now);
+                fresh.put(mac, record);
+                dhcpHistory.put(mac, record);
             }
+            if (fresh.isEmpty()) {
+                status("لم أجد سجلات DHCP صالحة؛ احتفظت بآخر البيانات الصحيحة.");
+                return;
+            }
+            dhcpSnapshot.clear();
+            dhcpSnapshot.putAll(fresh);
+            pruneDhcpHistory(now);
+            saveDhcpHistory();
             hasDhcpSnapshot = true;
-            dhcpSnapshotAt = System.currentTimeMillis();
+            dhcpSnapshotAt = now;
             renderCombinedDevices();
-            status("تم تحديث قائمة DHCP: " + dhcpSnapshot.size() + " سجلاً.");
+            if (!trafficSnapshot.isEmpty()) renderTrafficCards();
+            status("تم تحديث قائمة DHCP: " + dhcpSnapshot.size() + " سجلاً، وحُفظت آخر عناوين IP المعروفة.");
         } catch (JSONException e) {
             devicesView.setText("تعذر تحليل قائمة DHCP. أرسل تقرير التشخيص.");
         }
+    }
+
+    private void loadDhcpHistory() {
+        try {
+            JSONArray saved = new JSONArray(preferences.getString("dhcp_history_v1_" + activeHost, "[]"));
+            long now = System.currentTimeMillis();
+            for (int i = 0; i < saved.length(); i++) {
+                JSONObject item = saved.optJSONObject(i);
+                if (item == null) continue;
+                String mac = MacAddress.normalize(item.optString("mac", ""));
+                String ip = item.optString("ip", "");
+                long seenAt = item.optLong("seenAt", 0L);
+                if (!mac.isEmpty() && isValidRouterIp(ip) && seenAt > 0 && now - seenAt <= DHCP_HISTORY_MAX_AGE_MS) {
+                    item.put("mac", mac);
+                    dhcpHistory.put(mac, item);
+                }
+            }
+        } catch (Exception ignored) { }
+    }
+
+    private boolean isValidRouterIp(String ip) {
+        return ip != null && ip.matches("\\d{1,3}(\\.\\d{1,3}){3}") && !"0.0.0.0".equals(ip);
+    }
+
+    private void pruneDhcpHistory(long now) {
+        java.util.Iterator<Map.Entry<String, JSONObject>> it = dhcpHistory.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<String, JSONObject> entry = it.next();
+            if (now - entry.getValue().optLong("seenAt", 0L) > DHCP_HISTORY_MAX_AGE_MS) it.remove();
+        }
+    }
+
+    private void saveDhcpHistory() {
+        JSONArray saved = new JSONArray();
+        for (JSONObject item : dhcpHistory.values()) saved.put(item);
+        preferences.edit().putString("dhcp_history_v1_" + activeHost, saved.toString()).apply();
+    }
+
+    private JSONObject knownDhcpForMac(String mac) {
+        JSONObject current = dhcpSnapshot.get(mac);
+        if (current != null) return current;
+        JSONObject known = dhcpHistory.get(mac);
+        if (known == null) return null;
+        long seenAt = known.optLong("seenAt", 0L);
+        if (seenAt <= 0 || System.currentTimeMillis() - seenAt > DHCP_HISTORY_MAX_AGE_MS) return null;
+        return known;
+    }
+
+    private JSONObject knownDhcpForIp(String ip) {
+        for (JSONObject item : dhcpSnapshot.values()) {
+            if (ip.equals(item.optString("ip", ""))) return item;
+        }
+        JSONObject newest = null;
+        long newestSeenAt = 0L;
+        long now = System.currentTimeMillis();
+        for (JSONObject item : dhcpHistory.values()) {
+            if (!ip.equals(item.optString("ip", ""))) continue;
+            long seenAt = item.optLong("seenAt", 0L);
+            if (seenAt > 0 && now - seenAt <= DHCP_HISTORY_MAX_AGE_MS && seenAt > newestSeenAt) {
+                newest = item;
+                newestSeenAt = seenAt;
+            }
+        }
+        return newest;
     }
 
     private void renderGenericDevices(String json) {
@@ -1066,10 +1235,12 @@ public class MainActivity extends Activity {
 
         StringBuilder report = new StringBuilder(summary).append("\n");
         for (String mac : macs) {
-            JSONObject d = dhcpSnapshot.get(mac);
+            JSONObject current = dhcpSnapshot.get(mac);
+            JSONObject d = current != null ? current : knownDhcpForMac(mac);
             JSONObject w = wirelessSnapshot.get(mac);
+            String ipLabel = current != null ? "IP" : (d != null ? "آخر IP معروف" : "IP");
             report.append(displayName(mac, d)).append(" | ").append(mac)
-                    .append(" | IP: ").append(d == null ? "غير متاح" : d.optString("ip", ""))
+                    .append(" | ").append(ipLabel).append(": ").append(d == null ? "غير متاح" : d.optString("ip", ""))
                     .append(" | Wi-Fi: ").append(w == null ? "غير ظاهر في آخر لقطة" : "ظاهر")
                     .append("\n");
         }
@@ -1085,7 +1256,8 @@ public class MainActivity extends Activity {
     private String displayName(String mac, JSONObject dhcp) {
         String custom = preferences.getString("device_name_" + mac, "").trim();
         if (!custom.isEmpty()) return custom;
-        String routerName = dhcp == null ? "" : dhcp.optString("name", "").trim();
+        JSONObject record = dhcp != null ? dhcp : knownDhcpForMac(mac);
+        String routerName = record == null ? "" : record.optString("name", "").trim();
         return routerName.isEmpty() ? "جهاز غير مسمى" : routerName;
     }
 
@@ -1095,11 +1267,13 @@ public class MainActivity extends Activity {
         String query = searchDevices == null ? "" : searchDevices.getText().toString().trim().toLowerCase(Locale.ROOT);
         int shown = 0;
         for (String mac : macs) {
-            JSONObject d = dhcpSnapshot.get(mac);
+            JSONObject currentDhcp = dhcpSnapshot.get(mac);
+            JSONObject d = currentDhcp != null ? currentDhcp : knownDhcpForMac(mac);
             JSONObject w = wirelessSnapshot.get(mac);
             String name = displayName(mac, d);
             String ip = d == null ? "غير متاح" : d.optString("ip", "غير متاح");
-            String lease = d == null ? "" : d.optString("lease", "");
+            boolean historicalIp = currentDhcp == null && d != null && isValidRouterIp(ip);
+            String lease = currentDhcp == null || d == null ? "" : d.optString("lease", "");
             String bandwidth = w == null ? "" : w.optString("bandwidth", "");
             boolean wifiSeen = w != null;
             if ("wifi".equals(filterMode) && !wifiSeen) continue;
@@ -1130,7 +1304,8 @@ public class MainActivity extends Activity {
             row.addView(header, matchWrap());
 
             StringBuilder detail = new StringBuilder();
-            detail.append("IP: ").append(ip).append("\nMAC: ").append(mac);
+            detail.append(historicalIp ? "آخر IP معروف: " : "IP: ").append(ip).append("\nMAC: ").append(mac);
+            if (historicalIp) detail.append("\nملاحظة: هذا آخر عنوان DHCP معروف، وليس تأكيداً بأنه العنوان الحالي.");
             if (!bandwidth.isEmpty()) detail.append("\nعرض قناة Wi-Fi: ").append(bandwidth);
             if (!lease.isEmpty()) detail.append("\nLease Time: ").append(lease);
             if (!wifiSeen && d != null && hasWirelessSnapshot) detail.append("\nملاحظة: لم يظهر في آخر لقطة Wi-Fi؛ لا يعني ذلك بالضرورة أنه غير متصل بالشبكة عبر LAN.");
@@ -1165,15 +1340,18 @@ public class MainActivity extends Activity {
     }
 
     private void showDeviceDetails(String mac) {
-        JSONObject d = dhcpSnapshot.get(mac);
+        JSONObject current = dhcpSnapshot.get(mac);
+        JSONObject d = current != null ? current : knownDhcpForMac(mac);
         JSONObject w = wirelessSnapshot.get(mac);
+        String ip = d == null ? "غير متاح" : d.optString("ip", "غير متاح");
         StringBuilder details = new StringBuilder();
         details.append("الاسم: ").append(displayName(mac, d)).append("\n");
         details.append("MAC: ").append(mac).append("\n");
-        details.append("IP: ").append(d == null ? "غير متاح" : d.optString("ip", "غير متاح")).append("\n");
-        details.append("DHCP: ").append(d == null ? "غير موجود في آخر لقطة" : "موجود في آخر لقطة").append("\n");
+        details.append(current == null ? "آخر IP معروف: " : "IP الحالي من DHCP: ").append(ip).append("\n");
+        details.append("DHCP: ").append(current != null ? "موجود في آخر قراءة" : (d != null ? "لا يوجد في آخر قراءة؛ العنوان المعروض تاريخي" : "غير موجود في آخر قراءة")).append("\n");
         details.append("Wi-Fi: ").append(w == null ? "غير ظاهر في آخر لقطة" : "ظاهر في آخر لقطة").append("\n");
-        if (d != null) details.append("Lease Time: ").append(d.optString("lease", "غير متاح")).append("\n");
+        if (current != null) details.append("Lease Time: ").append(current.optString("lease", "غير متاح")).append("\n");
+        if (d != null) details.append("تاريخ آخر ربط DHCP: ").append(formatTime(d.optLong("seenAt", 0L))).append("\n");
         if (w != null) details.append("عرض قناة Wi-Fi: ").append(w.optString("bandwidth", "غير متاح")).append("\n");
         details.append("آخر تحديث DHCP: ").append(hasDhcpSnapshot ? formatTime(dhcpSnapshotAt) : "غير متاح").append("\n");
         details.append("آخر تحديث Wi-Fi: ").append(hasWirelessSnapshot ? formatTime(wirelessSnapshotAt) : "غير متاح");
@@ -1248,9 +1426,7 @@ public class MainActivity extends Activity {
                 if (foundDhcp || foundWifi) {
                     status("اكتملت القراءة: DHCP=" + dhcpCount + "، Wi-Fi=" + wifiCount + ".");
                 } else if (genericCount > 0) {
-                    status("وجدت سجلات غير مصنفة. أرسل تقرير التشخيص.");
-                } else {
-                    status("لم أجد جدول أجهزة معروفاً. افتح DHCP Client List أو Wireless Connection Status.");
+                    status("وجدت سجلات غير مصنفة في الصفحة الحالية. لم أغيّر سجلات DHCP أو Wi-Fi المحفوظة.");
                 }
                 finishPendingRead();
             });
