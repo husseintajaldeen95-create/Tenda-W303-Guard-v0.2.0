@@ -19,12 +19,14 @@ import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.webkit.CookieManager;
+import android.webkit.HttpAuthHandler;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.webkit.WebViewDatabase;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -65,6 +67,7 @@ public class MainActivity extends Activity {
     private ScrollView mainScrollView;
     private EditText routerIp;
     private WebView webView;
+    private AlertDialog routerAuthDialog;
     private TextView statusView;
     private TextView pageView;
     private TextView devicesView;
@@ -73,6 +76,16 @@ public class MainActivity extends Activity {
     private EditText searchDevices;
     private Button scanAllButton;
     private LinearLayout deviceCards;
+    // Static Assignment is tracked independently from active DHCP leases.
+    // Keys include both values so duplicate/conflicting router rows remain visible.
+    private final Map<String, JSONObject> staticAssignmentSnapshot = new LinkedHashMap<>();
+    private boolean hasStaticAssignmentSnapshot = false;
+    private boolean staticAssignmentHasInvalidRows = false;
+    private long staticAssignmentSnapshotAt = 0L;
+    private TextView staticReservationSummaryView;
+    private LinearLayout staticReservationCards;
+    private EditText reservationIpInput;
+    private EditText reservationMacInput;
     private String filterMode = "all";
     private boolean scanInProgress = false;
     private Runnable pendingReadCompletion;
@@ -251,10 +264,10 @@ public class MainActivity extends Activity {
             if (webView.getUrl() == null) toast("اتصل بالراوتر أولاً.");
             else { status("أعيد تحميل صفحة الراوتر..."); webView.reload(); }
         });
-        Button routerHome = button("الصفحة الرئيسية", false);
+        Button routerHome = button("صفحة الدخول إلى الراوتر", false);
         routerHome.setOnClickListener(v -> {
             if (webView.getUrl() == null) connectToRouter();
-            else webView.loadUrl("http://" + activeHost + "/advance.asp");
+            else openRouterLoginPage(true);
         });
         browserActions.addView(reloadPage, new LinearLayout.LayoutParams(0, -2, 1));
         browserActions.addView(routerHome, new LinearLayout.LayoutParams(0, -2, 1));
@@ -304,6 +317,44 @@ public class MainActivity extends Activity {
         deviceCards.setOrientation(LinearLayout.VERTICAL);
         tools.addView(deviceCards, matchWrap());
 
+        gap(root, 10);
+        LinearLayout reservationsPanel = card(root);
+        reservationsPanel.addView(text("حجوزات IP الثابتة - Static Assignment", 17, true, DARK), matchWrap());
+        reservationsPanel.addView(text("هذه القائمة مستقلة عن DHCP: الحجز يثبت IP لعنوان MAC، أما DHCP فيعرض الإيجار الحالي. اقرأ الجدولين قبل فحص أي حجز جديد.", 12, false, MUTED), matchWrap());
+        Button readReservations = button("قراءة حجوزات IP من الراوتر", false);
+        readReservations.setOnClickListener(v -> readStaticAssignments());
+        reservationsPanel.addView(readReservations, matchWrap());
+        staticReservationSummaryView = text("لم تتم قراءة جدول Static Assignment بعد.", 12, true, MUTED);
+        reservationsPanel.addView(staticReservationSummaryView, matchWrap());
+        staticReservationCards = new LinearLayout(this);
+        staticReservationCards.setOrientation(LinearLayout.VERTICAL);
+        reservationsPanel.addView(staticReservationCards, matchWrap());
+        gap(reservationsPanel, 5);
+        reservationsPanel.addView(text("فحص حجز جديد", 15, true, DARK), matchWrap());
+        TextView ipLabel = text("IP Address (اكتب آخر رقم مثل 110 أو العنوان كاملاً)", 12, false, MUTED);
+        ipLabel.setGravity(Gravity.LEFT);
+        reservationsPanel.addView(ipLabel, matchWrap());
+        reservationIpInput = new EditText(this);
+        reservationIpInput.setSingleLine(true);
+        reservationIpInput.setTextDirection(View.TEXT_DIRECTION_LTR);
+        reservationIpInput.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        reservationIpInput.setKeyListener(DigitsKeyListener.getInstance("0123456789."));
+        reservationIpInput.setHint("110 أو 192.168.0.110");
+        reservationsPanel.addView(reservationIpInput, matchWrap());
+        TextView macLabel = text("MAC Address", 12, false, MUTED);
+        macLabel.setGravity(Gravity.LEFT);
+        reservationsPanel.addView(macLabel, matchWrap());
+        reservationMacInput = new EditText(this);
+        reservationMacInput.setSingleLine(true);
+        reservationMacInput.setTextDirection(View.TEXT_DIRECTION_LTR);
+        reservationMacInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        reservationMacInput.setHint("AA:BB:CC:DD:EE:FF");
+        reservationsPanel.addView(reservationMacInput, matchWrap());
+        Button prepareReservation = button("فحص التعارض وتعبئة نموذج الراوتر", true);
+        prepareReservation.setOnClickListener(v -> prepareStaticReservation());
+        reservationsPanel.addView(prepareReservation, matchWrap());
+        reservationsPanel.addView(text("لأمان الشبكة، التطبيق يفحص التعارضات ويملأ حقول الراوتر فقط. لا يضغط Add أو OK ولا يحفظ أي تغيير تلقائياً. راجع القيم ثم أكمل الحجز يدوياً داخل صفحة الراوتر. وللحذف استخدم Delete في جدول Static Assignment ثم OK.", 11, false, MUTED), matchWrap());
+
         LinearLayout diagnostics = card(root);
         diagnostics.addView(text("أدوات التشخيص", 15, true, DARK), matchWrap());
         Button read = button("قراءة الأجهزة من الصفحة الحالية", false);
@@ -319,7 +370,7 @@ public class MainActivity extends Activity {
         diagnosticView.setTextIsSelectable(true);
         diagnostics.addView(diagnosticView, matchWrap());
 
-        TextView footer = text("الإصدار 0.2.8: تصحيح مسارات URL Filtering وTime Settings وفصلها عن MAC Access Control، مع استمرار المراقبة شبه اللحظية للمشتركين.", 12, true, MUTED);
+        TextView footer = text("الإصدار 0.2.11: قراءة حجوزات Static Assignment وفحص تعارض IP/MAC مع الحفاظ على المراقبة اللحظية للمشتركين.", 12, true, MUTED);
         footer.setPadding(dp(4), dp(12), dp(4), dp(4));
         root.addView(footer, matchWrap());
 
@@ -363,6 +414,15 @@ public class MainActivity extends Activity {
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 if (isAllowedRouterUri(request.getUrl())) return null;
                 return new WebResourceResponse("text/plain", "UTF-8", new ByteArrayInputStream(new byte[0]));
+            }
+
+            @Override
+            public void onReceivedHttpAuthRequest(WebView view, HttpAuthHandler authHandler, String host, String realm) {
+                // W303R firmware protects the management interface with an HTTP
+                // authentication challenge when the user opens the router IP.
+                // WebView's default handler cancels this challenge, which can leave
+                // the router frame blank. Ask the user for credentials explicitly.
+                showRouterAuthenticationDialog(authHandler, host, realm);
             }
 
             @Override
@@ -420,6 +480,12 @@ public class MainActivity extends Activity {
         lastDevices = "";
         dhcpSnapshot.clear();
         wirelessSnapshot.clear();
+        staticAssignmentSnapshot.clear();
+        hasStaticAssignmentSnapshot = false;
+        staticAssignmentHasInvalidRows = false;
+        staticAssignmentSnapshotAt = 0L;
+        if (staticReservationCards != null) staticReservationCards.removeAllViews();
+        if (staticReservationSummaryView != null) staticReservationSummaryView.setText("لم تتم قراءة جدول Static Assignment بعد.");
         trafficSnapshot.clear();
         trafficSnapshotAt = 0L;
         trafficSourcePath = "";
@@ -432,9 +498,86 @@ public class MainActivity extends Activity {
         if (deviceCards != null) deviceCards.removeAllViews();
         devicesView.setText("لم تتم قراءة الأجهزة بعد.");
         diagnosticView.setText("سيظهر تقرير الصفحة بعد تحميل واجهة الراوتر.");
-        // This firmware's working administration shell is /advance.asp.
-        // The root path (/) can return an empty document on this router.
-        webView.loadUrl("http://" + activeHost + "/advance.asp");
+        // Start at the router's normal entry point. On this W303R firmware the
+        // router requests its administrator password through HTTP authentication
+        // before serving the administration shell (usually /advance.asp).
+        openRouterLoginPage(true);
+    }
+
+    private void openRouterLoginPage(boolean requestPasswordAgain) {
+        if (webView == null || activeHost == null || activeHost.trim().isEmpty()) return;
+        if (requestPasswordAgain) {
+            try {
+                // Clear only WebView's cached HTTP-auth credentials so the router
+                // can ask for the password again. Do not clear router cookies.
+                WebViewDatabase.getInstance(this).clearHttpAuthUsernamePassword();
+            } catch (Exception ignored) { }
+        }
+        if (pageView != null) pageView.setText("صفحة الدخول: http://" + activeHost + "/");
+        status("فتح صفحة الدخول الأصلية للراوتر. أدخل كلمة مرور الإدارة عند ظهور نافذة المصادقة.");
+        webView.loadUrl("http://" + activeHost + "/");
+    }
+
+    private void showRouterAuthenticationDialog(HttpAuthHandler authHandler, String host, String realm) {
+        runOnUiThread(() -> {
+            if (isFinishing() || isDestroyed()) {
+                authHandler.cancel();
+                return;
+            }
+            if (routerAuthDialog != null && routerAuthDialog.isShowing()) {
+                // Avoid stacking authentication prompts if the router challenges
+                // multiple resources while a prompt is already visible.
+                authHandler.cancel();
+                return;
+            }
+
+            LinearLayout form = new LinearLayout(this);
+            form.setOrientation(LinearLayout.VERTICAL);
+            form.setPadding(dp(22), dp(8), dp(22), dp(4));
+
+            TextView explanation = text("الراوتر يطلب بيانات الدخول إلى لوحة الإدارة. أدخل كلمة المرور التي تستخدمها في المتصفح العادي.", 13, false, MUTED);
+            form.addView(explanation, matchWrap());
+
+            EditText usernameInput = new EditText(this);
+            usernameInput.setSingleLine(true);
+            usernameInput.setText("admin");
+            usernameInput.setHint("اسم المستخدم");
+            usernameInput.setInputType(InputType.TYPE_CLASS_TEXT);
+            form.addView(usernameInput, matchWrap());
+
+            EditText passwordInput = new EditText(this);
+            passwordInput.setSingleLine(true);
+            passwordInput.setHint("كلمة مرور الراوتر");
+            passwordInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+            form.addView(passwordInput, matchWrap());
+
+            AlertDialog dialog = new AlertDialog.Builder(this)
+                    .setTitle("تسجيل الدخول إلى الراوتر")
+                    .setMessage("العنوان: " + host + (realm == null || realm.trim().isEmpty() ? "" : "\n" + realm))
+                    .setView(form)
+                    .setPositiveButton("دخول", null)
+                    .setNegativeButton("إلغاء", (d, which) -> authHandler.cancel())
+                    .create();
+            routerAuthDialog = dialog;
+            dialog.setOnCancelListener(d -> authHandler.cancel());
+            dialog.setOnDismissListener(d -> {
+                if (routerAuthDialog == dialog) routerAuthDialog = null;
+            });
+            dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+                String username = usernameInput.getText().toString().trim();
+                String password = passwordInput.getText().toString();
+                if (username.isEmpty()) username = "admin";
+                if (password.isEmpty()) {
+                    passwordInput.setError("أدخل كلمة المرور");
+                    passwordInput.requestFocus();
+                    return;
+                }
+                status("تم إرسال بيانات الدخول إلى الراوتر للتحقق منها...");
+                authHandler.proceed(username, password);
+                dialog.dismiss();
+            }));
+            dialog.show();
+        });
     }
 
     private boolean isAllowedRouterUri(Uri uri) {
@@ -745,24 +888,26 @@ public class MainActivity extends Activity {
                 "function norm(s){return (s||'').toLowerCase().replace(/\\s+/g,' ').replace(/[.:]/g,' ').trim();}" +
                 "function macValue(s){var m=(s||'').match(/[0-9a-f]{2}(?:[:-][0-9a-f]{2}){5}/i);return m?m[0].replace(/-/g,':').toUpperCase():'';}" +
                 "function idx(headers,needle){for(var i=0;i<headers.length;i++){if(norm(headers[i])===norm(needle)||norm(headers[i]).indexOf(norm(needle))>=0)return i;}return -1;}" +
-                "var docs=collectDocs(),dhcp=[],wifi=[],generic=[],seenD={},seenW={},seenG={},foundD=false,foundW=false,framePaths=[];" +
+                "var docs=collectDocs(),dhcp=[],wifi=[],staticReservations=[],generic=[],seenD={},seenW={},seenS={},seenG={},foundD=false,foundW=false,foundS=false,framePaths=[];" +
                 "for(var x=0;x<docs.length;x++){var d=docs[x];framePaths.push(pathOf(d));var tables=d.querySelectorAll('table');" +
                 "for(var t=0;t<tables.length;t++){var table=tables[t],rows=table.querySelectorAll('tr'),headerAt=-1,headers=[],kind='';" +
                 "for(var r=0;r<rows.length;r++){var hc=Array.prototype.slice.call(rows[r].querySelectorAll('th,td')).map(cellText);var hn=hc.map(norm);" +
-                "var hasMac=hn.some(function(v){return v==='mac address'||v.indexOf('mac address')>=0;}),hasIp=hn.some(function(v){return v==='ip address'||v.indexOf('ip address')>=0;}),hasHost=hn.some(function(v){return v==='host name'||v.indexOf('host name')>=0;}),hasLease=hn.some(function(v){return v==='lease time'||v.indexOf('lease time')>=0;}),hasBw=hn.some(function(v){return v==='bandwidth'||v.indexOf('bandwidth')>=0;});" +
-                "if(hasMac&&hasIp&&hasHost&&hasLease){kind='dhcp';headerAt=r;headers=hc;break;}if(hasMac&&hasBw){kind='wifi';headerAt=r;headers=hc;break;}}" +
-                "if(!kind)continue;if(kind==='dhcp')foundD=true;else foundW=true;" +
+                "var hasMac=hn.some(function(v){return v==='mac address'||v.indexOf('mac address')>=0;}),hasIp=hn.some(function(v){return v==='ip address'||v.indexOf('ip address')>=0;}),hasHost=hn.some(function(v){return v==='host name'||v.indexOf('host name')>=0;}),hasLease=hn.some(function(v){return v==='lease time'||v.indexOf('lease time')>=0;}),hasBw=hn.some(function(v){return v==='bandwidth'||v.indexOf('bandwidth')>=0;}),hasDelete=hn.some(function(v){return v==='delete'||v.indexOf('delete')>=0;});" +
+                "if(hasMac&&hasIp&&hasHost&&hasLease){kind='dhcp';headerAt=r;headers=hc;break;}if(hasMac&&hasBw){kind='wifi';headerAt=r;headers=hc;break;}if(hasMac&&hasIp&&hasDelete){kind='static';headerAt=r;headers=hc;break;}}" +
+                "if(!kind)continue;if(kind==='dhcp')foundD=true;else if(kind==='wifi')foundW=true;else foundS=true;" +
                 "var macI=idx(headers,'MAC Address'),ipI=idx(headers,'IP Address'),nameI=idx(headers,'Host Name'),leaseI=idx(headers,'Lease Time'),bwI=idx(headers,'Bandwidth');" +
-                "for(var rr=headerAt+1;rr<rows.length;rr++){var row=rows[rr];if(row.querySelector('th'))continue;var cells=Array.prototype.slice.call(row.querySelectorAll('td')).map(cellText);if(!cells.length)continue;var raw=cells.join(' | '),mac=macValue(macI>=0?cells[macI]:raw);if(!mac)continue;" +
+                "for(var rr=headerAt+1;rr<rows.length;rr++){var row=rows[rr];if(row.querySelector('th'))continue;var cells=Array.prototype.slice.call(row.querySelectorAll('td')).map(cellText);if(!cells.length)continue;var raw=cells.join(' | '),mac=macValue(macI>=0?cells[macI]:raw);if(!mac){if(kind==='static'&&raw.replace(/\\s/g,'').length>0)staticReservations.push({ip:'',mac:'',sourcePath:pathOf(d),raw:raw});continue;}" +
                 "if(kind==='dhcp'){if(seenD[mac])continue;seenD[mac]=1;var ip=ipI>=0?(cells[ipI]||''):'';if(!/^\\d{1,3}(?:\\.\\d{1,3}){3}$/.test(ip)){var im=raw.match(/(?:\\d{1,3}\\.){3}\\d{1,3}/);ip=im?im[0]:'';}var nm=nameI>=0?(cells[nameI]||''):'';var lease=leaseI>=0?(cells[leaseI]||''):'';dhcp.push({mac:mac,ip:ip,name:nm,lease:lease,sourcePath:pathOf(d),raw:raw});}" +
-                "else{if(seenW[mac])continue;seenW[mac]=1;var bw=bwI>=0?(cells[bwI]||''):'';if(!bw){for(var z=0;z<cells.length;z++){if(/^\\d{1,3}\\s*M$/i.test(cells[z])){bw=cells[z].toUpperCase();break;}}}wifi.push({mac:mac,bandwidth:bw,sourcePath:pathOf(d),raw:raw});}}}}" +
-                "var onDeviceListPage=docs.some(function(d){var p=pathOf(d);return p.indexOf('/lan_dhcp_clients.asp')>=0||p.indexOf('/wireless_state.asp')>=0;});" +
-                "if(!foundD&&!foundW&&onDeviceListPage){for(var x=0;x<docs.length;x++){var ts=docs[x].querySelectorAll('table');for(var t=0;t<ts.length;t++){var rs=ts[t].querySelectorAll('tr');for(var r=0;r<rs.length;r++){var cells=Array.prototype.slice.call(rs[r].querySelectorAll('th,td')).map(cellText),raw=cells.join(' | '),mac=macValue(raw);if(!mac||seenG[mac])continue;seenG[mac]=1;var ipm=raw.match(/(?:\\d{1,3}\\.){3}\\d{1,3}/);generic.push({mac:mac,ip:ipm?ipm[0]:'',name:cells.length?cells[0]:'',raw:raw,sourcePath:pathOf(docs[x])});}}}}" +
-                "var count=dhcp.length+wifi.length+generic.length;" +
+                "else if(kind==='wifi'){if(seenW[mac])continue;seenW[mac]=1;var bw=bwI>=0?(cells[bwI]||''):'';if(!bw){for(var z=0;z<cells.length;z++){if(/^\\d{1,3}\\s*M$/i.test(cells[z])){bw=cells[z].toUpperCase();break;}}}wifi.push({mac:mac,bandwidth:bw,sourcePath:pathOf(d),raw:raw});}" +
+                "else{var sip=ipI>=0?(cells[ipI]||''):'';if(!/^\\d{1,3}(?:\\.\\d{1,3}){3}$/.test(sip)){var sim=raw.match(/(?:\\d{1,3}\\.){3}\\d{1,3}/);sip=sim?sim[0]:'';}var sk=sip+'|'+mac;if(seenS[sk])continue;seenS[sk]=1;staticReservations.push({ip:sip,mac:mac,sourcePath:pathOf(d),raw:raw});}}}}" +
+                "var onDhcpClientPage=docs.some(function(d){return pathOf(d).indexOf('/lan_dhcp_clients.asp')>=0;}),onDeviceListPage=docs.some(function(d){var p=pathOf(d);return p.indexOf('/lan_dhcp_clients.asp')>=0||p.indexOf('/wireless_state.asp')>=0;});" +
+                "if(!foundD&&!foundW&&!foundS&&onDeviceListPage){for(var x=0;x<docs.length;x++){var ts=docs[x].querySelectorAll('table');for(var t=0;t<ts.length;t++){var rs=ts[t].querySelectorAll('tr');for(var r=0;r<rs.length;r++){var cells=Array.prototype.slice.call(rs[r].querySelectorAll('th,td')).map(cellText),raw=cells.join(' | '),mac=macValue(raw);if(!mac||seenG[mac])continue;seenG[mac]=1;var ipm=raw.match(/(?:\\d{1,3}\\.){3}\\d{1,3}/);generic.push({mac:mac,ip:ipm?ipm[0]:'',name:cells.length?cells[0]:'',raw:raw,sourcePath:pathOf(docs[x])});}}}}" +
+                "var count=dhcp.length+wifi.length+staticReservations.length+generic.length;" +
                 "if(foundD&&(dhcp.length>0||attempt>=4))TendaBridge.clients(JSON.stringify(dhcp));" +
                 "if(foundW&&(wifi.length>0||attempt>=4))TendaBridge.wirelessDevices(JSON.stringify(wifi));" +
-                "if(!foundD&&!foundW&&onDeviceListPage&&(generic.length>0||attempt>=4))TendaBridge.genericDevices(JSON.stringify(generic));" +
-                "if(count>0||attempt>=4)TendaBridge.readResult(dhcp.length,wifi.length,generic.length,foundD,foundW);" +
+                "if(foundS)TendaBridge.staticAssignments(JSON.stringify(staticReservations));" +
+                "if(!foundD&&!foundW&&!foundS&&onDeviceListPage&&(generic.length>0||attempt>=4))TendaBridge.genericDevices(JSON.stringify(generic));" +
+                "if((count>0&&(dhcp.length>0||!foundD)&&(!onDhcpClientPage||foundS))||attempt>=4)TendaBridge.readResult(dhcp.length,wifi.length,generic.length,foundD,foundW);" +
                 "return count;})()";
         if (attempt == 0) status("أبحث عن جداول الأجهزة في الصفحة والإطارات الداخلية...");
         webView.evaluateJavascript(js, result -> {
@@ -1112,8 +1257,14 @@ public class MainActivity extends Activity {
         try {
             JSONArray arr = new JSONArray(json);
             if (arr.length() == 0) {
-                // An empty/early DOM read must not erase a previously verified lease map.
-                status("لم تحتوِ قراءة DHCP الحالية على سجلات؛ احتفظت بآخر ربط معروف للأجهزة.");
+                // The JavaScript parser calls this only after it has recognized the DHCP table.
+                // Therefore an empty array is a verified empty lease list, not an early DOM read.
+                dhcpSnapshot.clear();
+                hasDhcpSnapshot = true;
+                dhcpSnapshotAt = System.currentTimeMillis();
+                renderCombinedDevices();
+                renderReservationCards();
+                status("تمت قراءة جدول DHCP، ولا توجد إيجارات حالية ظاهرة فيه.");
                 return;
             }
             long now = System.currentTimeMillis();
@@ -1140,10 +1291,260 @@ public class MainActivity extends Activity {
             hasDhcpSnapshot = true;
             dhcpSnapshotAt = now;
             renderCombinedDevices();
+            renderReservationCards();
             if (!trafficSnapshot.isEmpty()) renderTrafficCards();
             status("تم تحديث قائمة DHCP: " + dhcpSnapshot.size() + " سجلاً، وحُفظت آخر عناوين IP المعروفة.");
         } catch (JSONException e) {
             devicesView.setText("تعذر تحليل قائمة DHCP. أرسل تقرير التشخيص.");
+        }
+    }
+
+    private void readStaticAssignments() {
+        openDhcpPageAndRead(() -> {
+            if (!hasStaticAssignmentSnapshot) {
+                status("لم أتعرف على جدول Static Assignment. افتح Advanced > DHCP Client List يدوياً ثم أعد القراءة.");
+                return;
+            }
+            status("تمت قراءة حجوزات IP الثابتة: " + staticAssignmentSnapshot.size() + " حجزاً.");
+            renderReservationCards();
+        });
+    }
+
+    private void openDhcpPageAndRead(Runnable completion) {
+        if (webView == null || webView.getUrl() == null) {
+            toast("اتصل بالراوتر وسجّل الدخول أولاً.");
+            return;
+        }
+        hasStaticAssignmentSnapshot = false;
+        staticAssignmentHasInvalidRows = false;
+        staticAssignmentSnapshot.clear();
+        hasDhcpSnapshot = false;
+        renderReservationCards();
+        navigateRouterContentPath("/lan_dhcp_clients.asp", navigated -> {
+            if (!navigated) {
+                status("تعذر فتح DHCP Client List. افتح Advanced > DHCP Client List يدوياً ثم أعد المحاولة.");
+                return;
+            }
+            handler.postDelayed(() -> verifyRouterContentPath("/lan_dhcp_clients.asp", 0, verified -> {
+                if (!verified) {
+                    status("لم أتحقق من فتح DHCP Client List؛ لم أنفذ أي تغيير.");
+                    return;
+                }
+                handler.postDelayed(() -> readDevicesFromPage(() -> {
+                    if (completion != null) completion.run();
+                }), 650);
+            }), 500);
+        });
+    }
+
+    private void prepareStaticReservation() {
+        String rawIp = reservationIpInput == null ? "" : reservationIpInput.getText().toString().trim();
+        String rawMac = reservationMacInput == null ? "" : reservationMacInput.getText().toString().trim();
+        if (rawIp.isEmpty() || rawMac.isEmpty()) {
+            toast("أدخل IP وMAC أولاً.");
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("فحص حجز IP جديد")
+                .setMessage("سيقرأ التطبيق DHCP وStatic Assignment من الراوتر، ثم يفحص التعارض ويملأ حقول Static Assignment فقط. لن يضغط Add أو OK ولن يحفظ أي تغيير تلقائياً.")
+                .setNegativeButton("إلغاء", null)
+                .setPositiveButton("فحص ومتابعة", (dialog, which) -> openDhcpPageAndRead(() -> validateAndFillReservation(rawIp, rawMac)))
+                .show();
+    }
+
+    private void validateAndFillReservation(String rawIp, String rawMac) {
+        if (!hasDhcpSnapshot || !hasStaticAssignmentSnapshot || dhcpSnapshotAt <= 0L || staticAssignmentSnapshotAt <= 0L) {
+            showReservationMessage("تعذر التحقق", "لم تكتمل قراءة DHCP وStatic Assignment معاً. لم يتم تعبئة النموذج. أعد قراءة صفحة DHCP Client List.");
+            return;
+        }
+        if (staticAssignmentHasInvalidRows) {
+            showReservationMessage("جدول الحجوزات غير مكتمل", "وجد التطبيق صفاً أو أكثر في Static Assignment بلا IP صالح. لا يمكن ضمان عدم التعارض؛ راجع الجدول في الراوتر وصحح الصفوف قبل الحجز.");
+            return;
+        }
+        java.util.List<IpReservationValidator.Entry> leases = new java.util.ArrayList<>();
+        for (JSONObject item : dhcpSnapshot.values()) {
+            if (IpReservationValidator.normalizeIpv4(item.optString("ip", "")).isEmpty()
+                    || MacAddress.normalize(item.optString("mac", "")).isEmpty()) {
+                showReservationMessage("سجل DHCP غير مكتمل", "يوجد سجل DHCP لا يحتوي على IP وMAC صالحين. أعد قراءة الصفحة وتأكد من اكتمال جدول DHCP قبل الحجز.");
+                return;
+            }
+            leases.add(new IpReservationValidator.Entry(item.optString("ip", ""), item.optString("mac", "")));
+        }
+        java.util.List<IpReservationValidator.Entry> reservations = new java.util.ArrayList<>();
+        for (JSONObject item : staticAssignmentSnapshot.values()) {
+            reservations.add(new IpReservationValidator.Entry(item.optString("ip", ""), item.optString("mac", "")));
+        }
+        IpReservationValidator.Result result = IpReservationValidator.validate(rawIp, rawMac, activeHost, leases, reservations);
+        if (!result.allowed) {
+            showReservationMessage(result.alreadyReserved ? "الحجز موجود بالفعل" : "تم منع الحجز بسبب تعارض", result.message);
+            return;
+        }
+        String[] octets = result.ip.split("\\.");
+        String lastOctet = octets[3];
+        String script = "(function(){" +
+                "function docs(){var a=[document];for(var i=0;i<a.length;i++){try{var fs=a[i].querySelectorAll('frame,iframe');for(var j=0;j<fs.length;j++){try{var d=fs[j].contentDocument;if(d&&a.indexOf(d)<0)a.push(d);}catch(e){}}}catch(e){}}return a;}" +
+                "var ds=docs();for(var i=0;i<ds.length;i++){var d=ds[i],ip=d.getElementById('IP'),macs=d.querySelectorAll('input[id=\"MAC\"]');if(!ip||macs.length<6)continue;" +
+                "ip.value=" + JSONObject.quote(lastOctet) + ";var parts=" + JSONObject.quote(result.mac) + ".split(':');for(var j=0;j<6;j++){macs[j].value=parts[j];}try{ip.scrollIntoView({block:'center'});}catch(e){}return 'filled';}return 'fields-not-found';})()";
+        webView.evaluateJavascript(script, value -> {
+            if ("\"filled\"".equals(value)) {
+                String message = "اجتاز الحجز فحص التعارض. تم ملء الحقول فقط:\nIP: " + result.ip + "\nMAC: " + result.mac +
+                        "\n\nلم يضغط التطبيق Add أو OK. راجع الحقول في صفحة الراوتر، ثم اضغط Add وبعدها OK بنفسك إذا كانت البيانات صحيحة.";
+                showReservationMessage("النموذج جاهز للمراجعة", message);
+                status("تم فحص الحجز وتعبئة نموذج الراوتر دون حفظ أي تغيير.");
+            } else {
+                showReservationMessage("لم أجد حقول Static Assignment", "وصل التطبيق إلى صفحة DHCP، لكنه لم يتعرف على حقول IP وMAC الستة. لم يتم تعديل أي حقل. افتح الصفحة يدوياً وأرسل تقرير التشخيص.");
+            }
+        });
+    }
+
+    private void showReservationMessage(String title, String message) {
+        new AlertDialog.Builder(this).setTitle(title).setMessage(message).setPositiveButton("حسناً", null).show();
+    }
+
+    private void renderStaticAssignments(String json) {
+        try {
+            JSONArray arr = new JSONArray(json);
+            Map<String, JSONObject> fresh = new LinkedHashMap<>();
+            staticAssignmentHasInvalidRows = false;
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject item = arr.optJSONObject(i);
+                if (item == null) continue;
+                String ip = IpReservationValidator.normalizeIpInput(item.optString("ip", ""), activeHost);
+                String mac = MacAddress.normalize(item.optString("mac", ""));
+                if (ip.isEmpty() || mac.isEmpty()) {
+                    staticAssignmentHasInvalidRows = true;
+                    continue;
+                }
+                JSONObject record = new JSONObject(item.toString());
+                record.put("ip", ip);
+                record.put("mac", mac);
+                fresh.put(ip + "|" + mac, record);
+            }
+            staticAssignmentSnapshot.clear();
+            staticAssignmentSnapshot.putAll(fresh);
+            hasStaticAssignmentSnapshot = true;
+            staticAssignmentSnapshotAt = System.currentTimeMillis();
+            renderReservationCards();
+            renderCombinedDevices();
+        } catch (JSONException e) {
+            hasStaticAssignmentSnapshot = false;
+            status("تعذر تحليل جدول Static Assignment. لم يتم تغيير بيانات DHCP.");
+        }
+    }
+
+    private JSONObject reservationForMac(String mac) {
+        JSONObject found = null;
+        for (JSONObject item : staticAssignmentSnapshot.values()) {
+            if (mac.equals(item.optString("mac", ""))) {
+                if (found != null) return found; // Duplicate reservations remain visible in the reservation list.
+                found = item;
+            }
+        }
+        return found;
+    }
+
+    private int reservationCountForMac(String mac) {
+        int count = 0;
+        for (JSONObject item : staticAssignmentSnapshot.values()) {
+            if (mac.equals(item.optString("mac", ""))) count++;
+        }
+        return count;
+    }
+
+    private JSONObject otherReservationForMac(String mac, String currentIp) {
+        for (JSONObject item : staticAssignmentSnapshot.values()) {
+            if (mac.equals(item.optString("mac", "")) && !currentIp.equals(item.optString("ip", ""))) return item;
+        }
+        return null;
+    }
+
+    private JSONObject reservationForIpByOtherMac(String ip, String mac) {
+        for (JSONObject item : staticAssignmentSnapshot.values()) {
+            if (ip.equals(item.optString("ip", "")) && !mac.equals(item.optString("mac", ""))) return item;
+        }
+        return null;
+    }
+
+    private JSONObject dhcpForIp(String ip) {
+        if (ip == null || ip.isEmpty()) return null;
+        for (JSONObject item : dhcpSnapshot.values()) {
+            if (ip.equals(item.optString("ip", ""))) return item;
+        }
+        return null;
+    }
+
+    private void renderReservationCards() {
+        if (staticReservationCards == null || staticReservationSummaryView == null) return;
+        staticReservationCards.removeAllViews();
+        if (!hasStaticAssignmentSnapshot) {
+            staticReservationSummaryView.setText("لم تتم قراءة جدول Static Assignment بعد.");
+            return;
+        }
+        int conflicts = 0, active = 0, idle = 0, mismatched = 0, duplicateMacs = 0;
+        for (JSONObject reservation : staticAssignmentSnapshot.values()) {
+            String ip = reservation.optString("ip", "");
+            String mac = reservation.optString("mac", "");
+            JSONObject leaseAtIp = dhcpForIp(ip);
+            JSONObject leaseForMac = dhcpSnapshot.get(mac);
+            if (reservationForIpByOtherMac(ip, mac) != null || (leaseAtIp != null && !mac.equals(leaseAtIp.optString("mac", "")))) conflicts++;
+            else if (otherReservationForMac(mac, ip) != null) duplicateMacs++;
+            else if (leaseAtIp != null) active++;
+            else if (leaseForMac != null && !ip.equals(leaseForMac.optString("ip", ""))) mismatched++;
+            else idle++;
+        }
+        staticReservationSummaryView.setText("عدد الحجوزات الثابتة: " + staticAssignmentSnapshot.size() +
+                " | مستخدمة من الجهاز نفسه: " + active + " | غير ظاهرة في DHCP: " + idle + " | IP غير مطابق: " + mismatched + " | تعارض IP: " + conflicts + " | MAC له أكثر من حجز: " + duplicateMacs +
+                (staticAssignmentHasInvalidRows ? "\nتنبيه: توجد صفوف غير مكتملة؛ فحص الحجز معطّل." : "") +
+                "\nآخر قراءة: " + formatTime(staticAssignmentSnapshotAt));
+        if (staticAssignmentSnapshot.isEmpty()) {
+            TextView empty = text("جدول Static Assignment فارغ. لا توجد حجوزات IP ثابتة حالياً.", 12, false, MUTED);
+            staticReservationCards.addView(empty, matchWrap());
+            return;
+        }
+        for (JSONObject reservation : staticAssignmentSnapshot.values()) {
+            String ip = reservation.optString("ip", "");
+            String mac = reservation.optString("mac", "");
+            JSONObject leaseAtIp = dhcpForIp(ip);
+            JSONObject leaseForMac = dhcpSnapshot.get(mac);
+            String state;
+            int stateColor;
+            JSONObject staticIpConflict = reservationForIpByOtherMac(ip, mac);
+            JSONObject duplicateMacReservation = otherReservationForMac(mac, ip);
+            if (staticIpConflict != null) {
+                state = "تعارض: هذا IP محجوز أيضاً لـ MAC آخر " + staticIpConflict.optString("mac", "");
+                stateColor = Color.rgb(180, 45, 45);
+            } else if (duplicateMacReservation != null) {
+                state = "تنبيه: هذا MAC لديه حجز ثابت آخر " + duplicateMacReservation.optString("ip", "");
+                stateColor = Color.rgb(180, 105, 0);
+            } else if (leaseAtIp != null && !mac.equals(leaseAtIp.optString("mac", ""))) {
+                state = "تعارض محتمل: هذا IP مستخدم بواسطة MAC آخر " + leaseAtIp.optString("mac", "");
+                stateColor = Color.rgb(180, 45, 45);
+            } else if (leaseAtIp != null) {
+                state = "محجوز ومستخدم حالياً من الجهاز نفسه عبر DHCP";
+                stateColor = Color.rgb(22, 128, 70);
+            } else if (leaseForMac != null && !ip.equals(leaseForMac.optString("ip", ""))) {
+                state = "الحجز لا يطابق IP الحالي للجهاز: " + leaseForMac.optString("ip", "");
+                stateColor = Color.rgb(180, 105, 0);
+            } else {
+                state = "محجوز، لكنه غير ظاهر حالياً في DHCP";
+                stateColor = MUTED;
+            }
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.VERTICAL);
+            row.setPadding(dp(10), dp(9), dp(10), dp(9));
+            android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+            bg.setColor(Color.rgb(250, 250, 251));
+            bg.setCornerRadius(dp(9));
+            bg.setStroke(dp(1), BORDER);
+            row.setBackground(bg);
+            row.addView(text("IP المحجوز: " + ip, 14, true, DARK), matchWrap());
+            row.addView(text("MAC: " + mac, 12, false, MUTED), matchWrap());
+            row.addView(text("الحالة: " + state, 12, true, stateColor), matchWrap());
+            Button open = button("فتح صفحة الحجوزات لإدارة هذا العنوان", false);
+            open.setOnClickListener(v -> openRouterSection("Advanced", "DHCP Client List"));
+            row.addView(open, matchWrap());
+            staticReservationCards.addView(row, matchWrap());
+            gap(staticReservationCards, 6);
         }
     }
 
@@ -1262,6 +1663,7 @@ public class MainActivity extends Activity {
         summary.append("إجمالي الأجهزة الفريدة: ").append(macs.size()).append("\n");
         summary.append("DHCP: ").append(hasDhcpSnapshot ? dhcpSnapshot.size() : "لم تُقرأ");
         summary.append("  |  Wi-Fi: ").append(hasWirelessSnapshot ? wirelessSnapshot.size() : "لم تُقرأ").append("\n");
+        summary.append("Static Assignment: ").append(hasStaticAssignmentSnapshot ? staticAssignmentSnapshot.size() : "لم تُقرأ").append("\n");
         if (hasDhcpSnapshot && hasWirelessSnapshot) {
             summary.append("في القائمتين: ").append(both)
                     .append("  |  Wi-Fi فقط: ").append(wifiOnly)
@@ -1340,10 +1742,20 @@ public class MainActivity extends Activity {
             row.addView(header, matchWrap());
 
             StringBuilder detail = new StringBuilder();
-            detail.append(historicalIp ? "آخر IP معروف: " : "IP: ").append(ip).append("\nMAC: ").append(mac);
+            detail.append(historicalIp ? "آخر IP معروف من DHCP: " : (currentDhcp != null ? "IP الحالي من DHCP: " : "IP: ")).append(ip).append("\nMAC: ").append(mac);
             if (historicalIp) detail.append("\nملاحظة: هذا آخر عنوان DHCP معروف، وليس تأكيداً بأنه العنوان الحالي.");
             if (!bandwidth.isEmpty()) detail.append("\nعرض قناة Wi-Fi: ").append(bandwidth);
             if (!lease.isEmpty()) detail.append("\nLease Time: ").append(lease);
+            if (hasStaticAssignmentSnapshot) {
+                JSONObject reservation = reservationForMac(mac);
+                if (reservation != null) {
+                    String reservedIp = reservation.optString("ip", "");
+                    detail.append("\nIP محجوز ثابت: ").append(reservedIp);
+                    if (reservationCountForMac(mac) > 1) detail.append("\nتحذير: لهذا MAC أكثر من حجز ثابت؛ راجع جدول Static Assignment.");
+                    if (currentDhcp != null && !reservedIp.equals(ip)) detail.append("\nتنبيه: IP الحالي من DHCP لا يطابق الحجز الثابت.");
+                    else if (currentDhcp != null) detail.append("\nDHCP الحالي يطابق الحجز الثابت.");
+                }
+            }
             if (!wifiSeen && d != null && hasWirelessSnapshot) detail.append("\nملاحظة: لم يظهر في آخر لقطة Wi-Fi؛ لا يعني ذلك بالضرورة أنه غير متصل بالشبكة عبر LAN.");
             TextView details = text(detail.toString(), 12, false, MUTED);
             details.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG);
@@ -1387,6 +1799,13 @@ public class MainActivity extends Activity {
         details.append("DHCP: ").append(current != null ? "موجود في آخر قراءة" : (d != null ? "لا يوجد في آخر قراءة؛ العنوان المعروض تاريخي" : "غير موجود في آخر قراءة")).append("\n");
         details.append("Wi-Fi: ").append(w == null ? "غير ظاهر في آخر لقطة" : "ظاهر في آخر لقطة").append("\n");
         if (current != null) details.append("Lease Time: ").append(current.optString("lease", "غير متاح")).append("\n");
+        if (hasStaticAssignmentSnapshot) {
+            JSONObject reservation = reservationForMac(mac);
+            details.append("Static Assignment: ").append(reservation == null ? "لا يوجد حجز ثابت في آخر قراءة" : reservation.optString("ip", "")).append("\n");
+            if (reservationCountForMac(mac) > 1) details.append("تحذير: يوجد أكثر من حجز ثابت لعنوان MAC نفسه.\n");
+        } else {
+            details.append("Static Assignment: لم تتم قراءته بعد\n");
+        }
         if (d != null) details.append("تاريخ آخر ربط DHCP: ").append(formatTime(d.optLong("seenAt", 0L))).append("\n");
         if (w != null) details.append("عرض قناة Wi-Fi: ").append(w.optString("bandwidth", "غير متاح")).append("\n");
         details.append("آخر تحديث DHCP: ").append(hasDhcpSnapshot ? formatTime(dhcpSnapshotAt) : "غير متاح").append("\n");
@@ -1444,6 +1863,11 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void genericDevices(String json) {
             runOnUiThread(() -> renderGenericDevices(json));
+        }
+
+        @JavascriptInterface
+        public void staticAssignments(String json) {
+            runOnUiThread(() -> renderStaticAssignments(json));
         }
 
         @JavascriptInterface
