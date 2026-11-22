@@ -374,7 +374,7 @@ public class MainActivity extends Activity {
         diagnosticView.setTextIsSelectable(true);
         diagnostics.addView(diagnosticView, matchWrap());
 
-        TextView footer = text("الإصدار 0.2.14: استكشاف صفحة جدولة MAC بصورة آمنة مع الحفاظ على المراقبة اللحظية للمشتركين.", 12, true, MUTED);
+        TextView footer = text("الإصدار 0.2.15: فحص نموذج جدولة MAC ودواله للقراءة فقط، دون حفظ أي إعداد.", 12, true, MUTED);
         footer.setPadding(dp(4), dp(12), dp(4), dp(4));
         root.addView(footer, matchWrap());
 
@@ -1273,16 +1273,27 @@ public class MainActivity extends Activity {
     }
 
     private void inspectCurrentPage() {
-        if (webView.getUrl() == null) return;
+        if (webView == null || webView.getUrl() == null) return;
+        // Read-only inspection: this code records form metadata and handler source;
+        // it never invokes router submit/delete functions or changes field values.
         String js = "(function(){" +
                 "function pathOnly(u){try{return new URL(u,location.href).pathname;}catch(e){return '';}}" +
                 "function txt(e){return ((e&&(e.innerText||e.textContent))||'').replace(/\\u00a0/g,' ').replace(/\\s+/g,' ').trim();}" +
                 "function docs(){var a=[document],seen=[document];for(var i=0;i<a.length;i++){try{var fs=a[i].querySelectorAll('frame,iframe');for(var j=0;j<fs.length;j++){try{var d=fs[j].contentDocument;if(d&&d.documentElement&&seen.indexOf(d)<0){seen.push(d);a.push(d);}}catch(e){}}}catch(e){}}return a;}" +
-                "var ds=docs(),o={url:pathOnly(location.href),title:document.title,frames:[],links:[],forms:[],tables:[]};" +
+                "var ds=docs(),o={url:pathOnly(location.href),title:document.title,frames:[],links:[],forms:[],tables:[],macSchedule:[]};" +
                 "for(var x=0;x<ds.length;x++){var d=ds[x],framePath='';try{framePath=pathOnly(d.location.href);}catch(e){framePath='frame';}o.frames.push(framePath);" +
                 "var as=d.querySelectorAll('a');for(var i=0;i<as.length&&o.links.length<120;i++){var a=as[i],tx=txt(a);if(tx)o.links.push({text:tx,href:pathOnly(a.href||'')});}" +
-                "var fs=d.querySelectorAll('form');for(var f=0;f<fs.length&&o.forms.length<30;f++){var fm=fs[f],ob={frame:framePath,action:pathOnly(fm.action||''),method:fm.method||'',onSubmit:(fm.getAttribute('onsubmit')||'').slice(0,300),fields:[]},cs=fm.querySelectorAll('input,select,textarea,button');for(var k=0;k<cs.length&&ob.fields.length<100;k++){var c=cs[k],typ=(c.type||'').toLowerCase(),nm=(c.name||'')+' '+(c.id||''),secret=typ==='password'||typ==='hidden'||/(pass|token|cookie|auth|session|key|csrf|stok)/i.test(nm),z={tag:c.tagName.toLowerCase(),type:typ,name:c.name||'',id:c.id||'',value:secret?'[محجوب]':(c.value||''),text:txt(c),onClick:(c.getAttribute('onclick')||'').slice(0,300)};if(c.tagName==='SELECT'){z.options=[];for(var n=0;n<c.options.length&&n<40;n++)z.options.push({text:c.options[n].text,value:c.options[n].value});}ob.fields.push(z);}o.forms.push(ob);}" +
-                "var ts=d.querySelectorAll('table');for(var t=0;t<ts.length&&o.tables.length<40;t++){var tab=ts[t],rs=tab.querySelectorAll('tr'),headers=[],headerAt=-1,preview=[];for(var r=0;r<rs.length;r++){var cc=Array.prototype.slice.call(rs[r].querySelectorAll('th,td')).map(txt);var joined=cc.join(' ').toLowerCase();if((joined.indexOf('host name')>=0&&joined.indexOf('lease time')>=0)||(joined.indexOf('mac address')>=0&&joined.indexOf('bandwidth')>=0)||(joined.indexOf('ip address')>=0&&joined.indexOf('uplink')>=0&&joined.indexOf('downlink')>=0)){headers=cc;headerAt=r;break;}}if(headerAt<0&&rs.length>0){headers=Array.prototype.slice.call(rs[0].querySelectorAll('th,td')).map(txt);headerAt=0;}for(var pr=headerAt+1;pr<rs.length&&preview.length<5;pr++){var vals=Array.prototype.slice.call(rs[pr].querySelectorAll('th,td')).map(txt);if(vals.length)preview.push(vals);}o.tables.push({frame:framePath,headers:headers,rowCount:rs.length,previewRows:preview});}}" +
+                "var fs=d.querySelectorAll('form');for(var f=0;f<fs.length&&o.forms.length<30;f++){var fm=fs[f],ob={frame:framePath,name:fm.name||'',id:fm.id||'',action:pathOnly(fm.action||''),method:fm.method||'',target:fm.target||'',enctype:fm.enctype||'',onSubmit:(fm.getAttribute('onsubmit')||'').slice(0,500),fields:[]},cs=fm.querySelectorAll('input,select,textarea,button');" +
+                "for(var k=0;k<cs.length&&ob.fields.length<120;k++){var c=cs[k],typ=(c.type||'').toLowerCase(),nm=(c.name||'')+' '+(c.id||''),secret=typ==='password'||typ==='hidden'||/(pass|token|cookie|auth|session|key|csrf|stok)/i.test(nm),clickAttr=(c.getAttribute('onclick')||'').slice(0,500),changeAttr=(c.getAttribute('onchange')||'').slice(0,500),clickProp='',changeProp='';" +
+                "try{if(typeof c.onclick==='function')clickProp=c.onclick.toString().slice(0,1200);}catch(e){}try{if(typeof c.onchange==='function')changeProp=c.onchange.toString().slice(0,1200);}catch(e){}" +
+                "var z={tag:c.tagName.toLowerCase(),type:typ,name:c.name||'',id:c.id||'',value:secret?'[محجوب]':(c.value||''),text:txt(c),onClick:clickAttr,onChange:changeAttr,onClickHandler:clickProp,onChangeHandler:changeProp};" +
+                "if(c.tagName==='SELECT'){z.options=[];for(var n=0;n<c.options.length&&n<50;n++){z.options.push({text:c.options[n].text,value:c.options[n].value});}}ob.fields.push(z);}o.forms.push(ob);}" +
+                "if(framePath==='/firewall_mac.asp'){var ms={frame:framePath,functions:{},policyOptions:[],formName:'',formId:'',formAction:'',formMethod:'',controls:[]};" +
+                "var fnNames=['preSubmit','onSelected','onDel','init'];for(var q=0;q<fnNames.length;q++){var fnName=fnNames[q];try{var fn=d.defaultView[fnName];ms.functions[fnName]=typeof fn==='function'?fn.toString().slice(0,6000):'غير موجود';}catch(e){ms.functions[fnName]='تعذر القراءة';}}" +
+                "var policy=d.getElementById('curNum');if(policy){for(var po=0;po<policy.options.length&&po<20;po++){ms.policyOptions.push({text:policy.options[po].text,value:policy.options[po].value});}}" +
+                "var mf=d.forms['frmSetup']||d.querySelector('form');if(mf){ms.formName=mf.name||'';ms.formId=mf.id||'';ms.formAction=pathOnly(mf.action||'');ms.formMethod=mf.method||'';var mc=mf.querySelectorAll('input,select,textarea,button');for(var mi=0;mi<mc.length&&mi<100;mi++){var el=mc[mi],et=(el.type||'').toLowerCase(),en=(el.name||'')+' '+(el.id||''),hide=et==='password'||et==='hidden'||/(pass|token|cookie|auth|session|key|csrf|stok)/i.test(en);ms.controls.push({tag:el.tagName.toLowerCase(),type:et,name:el.name||'',id:el.id||'',value:hide?'[محجوب]':(el.value||''),checked:el.type==='checkbox'?!!el.checked:undefined,onChange:(el.getAttribute('onchange')||'').slice(0,500),onClick:(el.getAttribute('onclick')||'').slice(0,500)});}}" +
+                "o.macSchedule.push(ms);}" +
+                "var ts=d.querySelectorAll('table');for(var t=0;t<ts.length&&o.tables.length<40;t++){var tab=ts[t],rs=tab.querySelectorAll('tr'),headers=[],headerAt=-1,preview=[];for(var r=0;r<rs.length;r++){var cc=Array.prototype.slice.call(rs[r].querySelectorAll('th,td')).map(txt);var joined=cc.join(' ').toLowerCase();if((joined.indexOf('host name')>=0&&joined.indexOf('lease time')>=0)||(joined.indexOf('mac address')>=0&&joined.indexOf('bandwidth')>=0)||(joined.indexOf('ip address')>=0&&joined.indexOf('uplink')>=0&&joined.indexOf('downlink')>=0)){headers=cc;headerAt=r;break;}}if(headerAt<0&&rs.length>0){headers=Array.prototype.slice.call(rs[0].querySelectorAll('th,td')).map(txt);headerAt=0;}var maxRows=framePath==='/firewall_mac.asp'?20:5;for(var pr=headerAt+1;pr<rs.length&&preview.length<maxRows;pr++){var vals=Array.prototype.slice.call(rs[pr].querySelectorAll('th,td')).map(txt);if(vals.length)preview.push(vals);}o.tables.push({frame:framePath,headers:headers,rowCount:rs.length,previewRows:preview});}}" +
                 "TendaBridge.diagnostic(JSON.stringify(o));return 'ok';})()";
         webView.evaluateJavascript(js, null);
     }

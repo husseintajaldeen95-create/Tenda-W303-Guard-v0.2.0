@@ -1,3 +1,11 @@
+## 0.2.15 — MAC Schedule Form Audit (Read Only)
+- Expanded the current-page diagnostic to report form name/id/target/enctype and input event handlers.
+- Added read-only capture of the MAC schedule page's `preSubmit`, `onSelected`, `onDel`, and `init` function source.
+- Captures the ten policy selector options and checkbox checked state without invoking router functions.
+- Continues to redact hidden/password/auth-related field values.
+- Does not submit, delete, switch policy selections, or modify router settings.
+- `.github/workflows/android.yaml` is unchanged.
+
 ## 0.2.14 — MAC Schedule Page Discovery
 - Added a separate shortcut for `Security > MAC Address Filter Settings` using the router's visible menu labels because its exact page path has not yet been verified.
 - Added label aliases for firmware menu variants.
