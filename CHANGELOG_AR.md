@@ -1,3 +1,10 @@
+## 0.2.19 — Restore v0.2.17 router navigation mapping
+
+- Restored the exact `Security > MAC Address Filter Settings` route mapping from v0.2.17: `/firewall_mac.asp`.
+- Kept the v0.2.18 MAC schedule auto-zero/restore implementation unchanged.
+- No other router-page route, menu label, traffic-monitoring function, DHCP/Wireless reader, or automation behavior was edited in this patch.
+- Source correction only; APK build and real-router navigation still require device verification.
+
 ## 0.2.18 — MAC Schedule Auto Zero and Restore
 
 - Kept the v0.2.15 navigation implementation unchanged.

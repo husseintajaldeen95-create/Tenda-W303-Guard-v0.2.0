@@ -433,7 +433,7 @@ public class MainActivity extends Activity {
         diagnosticView.setTextIsSelectable(true);
         diagnostics.addView(diagnosticView, matchWrap());
 
-        TextView footer = text("الإصدار 0.2.18: إضافة التصفير والاستعادة التلقائية لسياسات MAC مع الحفاظ على وظائف النسخة السابقة.", 12, true, MUTED);
+        TextView footer = text("الإصدار 0.2.19: استعادة ربط صفحات التنقل كما في 0.2.17 مع إبقاء التصفير التلقائي لسياسات MAC.", 12, true, MUTED);
         footer.setPadding(dp(4), dp(12), dp(4), dp(4));
         root.addView(footer, matchWrap());
 
@@ -680,6 +680,7 @@ public class MainActivity extends Activity {
         if ("Wireless".equalsIgnoreCase(parentLabel) && "Access Control".equalsIgnoreCase(childLabel)) return "/wireless_filter.asp";
         if ("Security".equalsIgnoreCase(parentLabel) && ("URL Filtering".equalsIgnoreCase(childLabel)
                 || "URL Filter".equalsIgnoreCase(childLabel))) return "/firewall_urlfilter.asp";
+        if ("Security".equalsIgnoreCase(parentLabel) && "MAC Address Filter Settings".equalsIgnoreCase(childLabel)) return "/firewall_mac.asp";
         if ("Tools".equalsIgnoreCase(parentLabel) && "Time Settings".equalsIgnoreCase(childLabel)) return "/system_hostname.asp";
         if ("QoS".equalsIgnoreCase(parentLabel) && "Bandwidth Control".equalsIgnoreCase(childLabel)) return "/net_tc.asp";
         if ("QoS".equalsIgnoreCase(parentLabel) && "Traffic Statistics".equalsIgnoreCase(childLabel)) return "/sys_iptAccount.asp";
