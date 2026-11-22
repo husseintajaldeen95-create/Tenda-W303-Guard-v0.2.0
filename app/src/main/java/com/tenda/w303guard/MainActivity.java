@@ -370,7 +370,7 @@ public class MainActivity extends Activity {
         diagnosticView.setTextIsSelectable(true);
         diagnostics.addView(diagnosticView, matchWrap());
 
-        TextView footer = text("الإصدار 0.2.11: قراءة حجوزات Static Assignment وفحص تعارض IP/MAC مع الحفاظ على المراقبة اللحظية للمشتركين.", 12, true, MUTED);
+        TextView footer = text("الإصدار 0.2.12: مزامنة قائمة الراوتر الجانبية مع الصفحة المفتوحة، مع الحفاظ على المراقبة اللحظية.", 12, true, MUTED);
         footer.setPadding(dp(4), dp(12), dp(4), dp(4));
         root.addView(footer, matchWrap());
 
@@ -659,30 +659,20 @@ public class MainActivity extends Activity {
                 status("لم أجد تبويب " + parentLabel + ". تأكد من تسجيل الدخول ثم أعد المحاولة.");
                 return;
             }
-            handler.postDelayed(() -> {
-                String expectedPath = routerPagePath(parentLabel, childLabel);
-                if (expectedPath != null) {
-                    verifyRouterContentPath(expectedPath, 0, alreadyAtTarget -> {
-                        if (alreadyAtTarget) finishRouterSectionOpen(childLabel);
-                        else clickRouterChildFromMenu(parentLabel, childLabel, expectedPath);
-                    });
-                } else {
-                    clickRouterChildFromMenu(parentLabel, childLabel, null);
+            // Always activate the child through Tenda's own menu. This keeps the
+            // sidebar highlight synchronized even if the content frame is already
+            // showing the target URL.
+            handler.postDelayed(() -> clickRouterLabelAny(childLabelAliases(childLabel), 0, childFound -> {
+                if (!childFound) {
+                    status("فُتح " + parentLabel + " لكن لم أجد الصفحة الفرعية " + childLabel + ". افتحها يدوياً ثم أعد المحاولة.");
+                    return;
                 }
-            }, 850);
-        });
-    }
-
-    private void clickRouterChildFromMenu(String parentLabel, String childLabel, String expectedPath) {
-        clickRouterLabelAny(childLabelAliases(childLabel), 0, childFound -> {
-            if (!childFound) {
-                status("فُتح " + parentLabel + " لكن لم أجد الصفحة الفرعية " + childLabel + ". افتحها يدوياً ثم أعد المحاولة.");
-                return;
-            }
-            handler.postDelayed(() -> {
-                if (expectedPath == null) {
-                    finishRouterSectionOpen(childLabel);
-                } else {
+                handler.postDelayed(() -> {
+                    String expectedPath = routerPagePath(parentLabel, childLabel);
+                    if (expectedPath == null) {
+                        finishRouterSectionOpen(childLabel);
+                        return;
+                    }
                     verifyRouterContentPath(expectedPath, 0, verified -> {
                         if (verified) finishRouterSectionOpen(childLabel);
                         else {
@@ -690,8 +680,8 @@ public class MainActivity extends Activity {
                             inspectCurrentPage();
                         }
                     });
-                }
-            }, 900);
+                }, 900);
+            }), 850);
         });
     }
 
@@ -759,7 +749,17 @@ public class MainActivity extends Activity {
         status("بدأ تحديث القائمتين. لن يتم تغيير أي إعداد في الراوتر.");
         navigateRouterContentPath("/lan_dhcp_clients.asp", navigated -> {
             if (!navigated) {
-                finishFullScan(false, "تعذر الوصول إلى إطار DHCP. افتح Advanced ثم DHCP Client List يدوياً.");
+                openRouterSectionByMenu("Advanced", "DHCP Client List");
+                handler.postDelayed(() -> verifyRouterContentPath("/lan_dhcp_clients.asp", 0, verified -> {
+                    if (!verified) {
+                        finishFullScan(false, "تعذر فتح DHCP Client List من قائمة الراوتر. افتحها يدوياً ثم أعد الفحص.");
+                        return;
+                    }
+                    handler.postDelayed(() -> readDevicesFromPage(() -> {
+                        if (scanMetaView != null) scanMetaView.setText("اكتملت قراءة DHCP. المرحلة 2 من 2: فتح قائمة Wi-Fi...");
+                        handler.postDelayed(this::scanWirelessStage, 450);
+                    }), 700);
+                }), 1400);
                 return;
             }
             handler.postDelayed(() -> verifyRouterContentPath("/lan_dhcp_clients.asp", 0, verified -> {
@@ -826,20 +826,29 @@ public class MainActivity extends Activity {
      * Returns false when no suitable frame or exact href is present.
      */
     private void navigateRouterContentPath(String targetPath, BooleanResult callback) {
+        // Always use the router's own menu link when available. Directly assigning
+        // frame.location.href changes the content frame but bypasses the router's
+        // menu-selection script, leaving the left navigation highlight stale.
+        // Do not return early when the target is already open: clicking its menu
+        // link again synchronizes the active menu item with the content frame.
         String js = "(function(){" +
                 "var target=" + JSONObject.quote(targetPath) + ";" +
                 "function path(w){try{return new URL(w.location.href).pathname;}catch(e){return '';}}" +
-                "function full(){return location.protocol+'//'+location.host+target;}" +
                 "var wins=[];" +
                 "function walk(w,depth){try{wins.push({w:w,depth:depth,path:path(w)});for(var i=0;i<w.frames.length;i++){try{walk(w.frames[i],depth+1);}catch(e){}}}catch(e){}}" +
                 "walk(window,0);" +
-                "for(var i=0;i<wins.length;i++){if(wins[i].path===target)return true;}" +
-                "for(var i=0;i<wins.length;i++){try{var d=wins[i].w.document,as=d.querySelectorAll('a[href]');for(var j=0;j<as.length;j++){try{if(new URL(as[j].href,location.href).pathname===target){as[j].click();return true;}}catch(e){}}}catch(e){}}" +
-                "var candidates=wins.filter(function(x){return x.depth>0&&x.path!=='/advance.asp'&&x.path!=='/index.asp'&&x.path!=='/';});" +
-                "candidates.sort(function(a,b){return b.depth-a.depth;});" +
-                "if(candidates.length){try{candidates[0].w.location.href=full();return true;}catch(e){}}" +
-                "var nested=wins.filter(function(x){return x.depth>0;});if(nested.length){try{nested[nested.length-1].w.location.href=full();return true;}catch(e){}}" +
-                "try{window.location.href=full();return true;}catch(e){}return false;})()";
+                "var links=[];" +
+                "for(var i=0;i<wins.length;i++){" +
+                "if(wins[i].path===target)continue;" +
+                "try{var as=wins[i].w.document.querySelectorAll('a[href]');" +
+                "for(var j=0;j<as.length;j++){try{" +
+                "var u=new URL(as[j].href,wins[i].w.location.href);" +
+                "if(u.pathname===target&&u.host===location.host)links.push({a:as[j],depth:wins[i].depth});" +
+                "}catch(e){}}}catch(e){}}" +
+                "links.sort(function(a,b){return a.depth-b.depth;});" +
+                "for(var k=0;k<links.length;k++){try{links[k].a.click();return true;}catch(e){}}" +
+                // No direct frame navigation fallback: callers use the visible menu.
+                "return false;})()";
         webView.evaluateJavascript(js, result -> callback.onResult("true".equals(result)));
     }
 
@@ -1321,19 +1330,22 @@ public class MainActivity extends Activity {
         hasDhcpSnapshot = false;
         renderReservationCards();
         navigateRouterContentPath("/lan_dhcp_clients.asp", navigated -> {
+            Runnable verifyAndRead = () -> handler.postDelayed(() ->
+                    verifyRouterContentPath("/lan_dhcp_clients.asp", 0, verified -> {
+                        if (!verified) {
+                            status("لم أتحقق من فتح DHCP Client List؛ لم أنفذ أي تغيير.");
+                            return;
+                        }
+                        handler.postDelayed(() -> readDevicesFromPage(() -> {
+                            if (completion != null) completion.run();
+                        }), 650);
+                    }), 500);
             if (!navigated) {
-                status("تعذر فتح DHCP Client List. افتح Advanced > DHCP Client List يدوياً ثم أعد المحاولة.");
+                openRouterSectionByMenu("Advanced", "DHCP Client List");
+                verifyAndRead.run();
                 return;
             }
-            handler.postDelayed(() -> verifyRouterContentPath("/lan_dhcp_clients.asp", 0, verified -> {
-                if (!verified) {
-                    status("لم أتحقق من فتح DHCP Client List؛ لم أنفذ أي تغيير.");
-                    return;
-                }
-                handler.postDelayed(() -> readDevicesFromPage(() -> {
-                    if (completion != null) completion.run();
-                }), 650);
-            }), 500);
+            verifyAndRead.run();
         });
     }
 
