@@ -1,3 +1,10 @@
+## 0.2.14 — MAC Schedule Page Discovery
+- Added a separate shortcut for `Security > MAC Address Filter Settings` using the router's visible menu labels because its exact page path has not yet been verified.
+- Added label aliases for firmware menu variants.
+- Added an explicit read-only notice: no MAC policy, time, or router setting is changed in this stage.
+- Existing live upload/download monitoring, DHCP/Wireless parsing, and router navigation recovery are preserved.
+- `.github/workflows/android.yaml` is unchanged.
+
 ## 0.2.13 — Navigation Recovery
 - Restored the nested-frame fallback for router page navigation.
 - Open the Tenda top-level section before navigating to its child page, keeping the left navigation aligned with the content frame.

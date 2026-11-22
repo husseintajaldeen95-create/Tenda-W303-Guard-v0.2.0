@@ -181,6 +181,7 @@ public class MainActivity extends Activity {
         addNavButton(nav, "الأجهزة اللاسلكية المتصلة", () -> openRouterSection("Wireless", "Wireless Connection Status"));
         addNavButton(nav, "السماح أو منع اتصال Wi-Fi (MAC)", () -> openRouterSection("Wireless", "Access Control"));
         addNavButton(nav, "تصفية المواقع وجدولة الوصول", () -> openRouterSection("Security", "URL Filtering"));
+        addNavButton(nav, "جدولة الإنترنت حسب MAC", () -> openRouterSection("Security", "MAC Address Filter Settings"));
         addNavButton(nav, "ضبط وقت الراوتر", () -> openRouterSection("Tools", "Time Settings"));
         addNavButton(nav, "QoS وتحديد السرعة", () -> openRouterSection("QoS", "Bandwidth Control"));
         addNavButton(nav, "QoS - Traffic Statistics", () -> openRouterSection("QoS", "Traffic Statistics"));
@@ -248,6 +249,9 @@ public class MainActivity extends Activity {
         schedule.addView(text(
                 "مهم: Wireless > Access Control هو المكان المؤكد للتحكم بعناوين MAC المسموح لها أو الممنوعة من الانضمام إلى شبكة Wi-Fi. أما Security > URL Filtering فيتحكم في الوصول إلى مواقع محددة وفق الحقول التي يعرضها الراوتر. لا تخلط بين الوظيفتين.",
                 13, true, DARK), matchWrap());
+        schedule.addView(text(
+                "مرحلة آمنة: يفتح التطبيق صفحة MAC Address Filter Settings من قائمة الراوتر ويقرأ نموذجها للتشخيص فقط. لن يغيّر أي وقت أو سياسة ولن يضغط OK قبل التحقق من أسماء الحقول وطريقة الحفظ الفعلية.",
+                12, false, MUTED), matchWrap());
 
         gap(root, 10);
         LinearLayout browserCard = card(root);
@@ -370,7 +374,7 @@ public class MainActivity extends Activity {
         diagnosticView.setTextIsSelectable(true);
         diagnostics.addView(diagnosticView, matchWrap());
 
-        TextView footer = text("الإصدار 0.2.11: قراءة حجوزات Static Assignment وفحص تعارض IP/MAC مع الحفاظ على المراقبة اللحظية للمشتركين.", 12, true, MUTED);
+        TextView footer = text("الإصدار 0.2.14: استكشاف صفحة جدولة MAC بصورة آمنة مع الحفاظ على المراقبة اللحظية للمشتركين.", 12, true, MUTED);
         footer.setPadding(dp(4), dp(12), dp(4), dp(4));
         root.addView(footer, matchWrap());
 
@@ -769,6 +773,9 @@ public class MainActivity extends Activity {
         }
         if ("Time Settings".equalsIgnoreCase(childLabel)) return new String[]{"Time Settings", "Time"};
         if ("Access Control".equalsIgnoreCase(childLabel)) return new String[]{"Access Control"};
+        if ("MAC Address Filter Settings".equalsIgnoreCase(childLabel)) {
+            return new String[]{"MAC Address Filter Settings", "MAC Filter Settings", "MAC Address Filter"};
+        }
         return new String[]{childLabel};
     }
 
