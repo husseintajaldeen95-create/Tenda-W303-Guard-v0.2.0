@@ -1,69 +1,8 @@
-## 0.2.12 — Router Navigation & Sidebar Synchronization
-- تعديل التنقل بين صفحات الراوتر لاستخدام روابط قائمة Tenda الأصلية بدلاً من تغيير `frame.location.href` مباشرة؛ لأن تغيير إطار المحتوى وحده قد يترك تمييز القائمة الجانبية على الصفحة السابقة.
-- عند فتح الصفحة نفسها مجدداً، يحاول التطبيق تفعيل رابط القائمة الأصلي أيضاً لمزامنة التحديد الجانبي مع المحتوى.
-- عند تعذر العثور على رابط مباشر، يعود التطبيق إلى النقر على التبويب الرئيسي ثم الصفحة الفرعية من قائمة الراوتر.
-- تطبيق مسار الرجوع إلى القائمة في قراءة DHCP وحجوزات Static Assignment بدلاً من التنقل المباشر الصامت.
-- لا توجد أي أوامر كتابة أو تغيير لإعدادات الراوتر في هذا الإصدار.
-- لم يتم تعديل `.github/workflows/android.yaml`.
-- جدولة الإنترنت الآلية لم تُضف بعد؛ تقرير `/wireless_filter.asp` لا يحتوي حقول وقت، ويلزم فحص نموذج `/firewall_urlfilter.asp` قبل برمجتها.
-
-## 0.2.11 — Static Assignment & IP Conflict Guard
-- إضافة قراءة مستقلة لجدول Static Assignment من صفحة DHCP Client List، مع دعم الجدول الفارغ.
-- فصل الحجوزات الثابتة عن إيجارات DHCP في واجهة التطبيق وتقارير حالة المشتركين.
-- عرض حالة كل حجز ومقارنته بآخر إيجار DHCP حسب IP وMAC.
-- إضافة فاحص حجز يتحقق من صحة IPv4/MAC، ومن نطاق شبكة الراوتر، ومن تعارض IP مع DHCP أو Static Assignment.
-- منع تعدد الحجوزات المختلفة لعنوان MAC نفسه ومنع حجز IP لعنوان MAC آخر.
-- إضافة تعبئة آمنة لحقول Static Assignment بعد الفحص؛ لا ينفذ التطبيق Add أو OK ولا يرسل تغييراً تلقائياً إلى الراوتر.
-- إضافة اختبارات JVM مستقلة لقواعد التحقق.
-- الإبقاء على `.github/workflows/android.yaml` دون أي تعديل.
-
-## 0.2.10 — Router Login & HTTP Authentication Fix
-- التراجع عن فتح `/advance.asp` مباشرة؛ يبدأ الاتصال الآن من `http://<router-ip>/` كما يطلب دليل W303R.
-- إضافة معالجة `onReceivedHttpAuthRequest` حتى تظهر نافذة إدخال اسم المستخدم وكلمة المرور عند طلب الراوتر للمصادقة. كان WebView الافتراضي يلغي هذا الطلب، وهو سبب محتمل لظهور صفحة فارغة.
-- زر «صفحة الدخول إلى الراوتر» يفتح الجذر ويزيل بيانات HTTP-auth المخزنة مؤقتاً لإظهار طلب كلمة المرور من جديد.
-- لا يحفظ التطبيق كلمة المرور ولا يرسلها إلا إلى عنوان الراوتر المحلي.
-- لم يتم تعديل `.github/workflows/android.yaml`.
-
-# سجل التغييرات
-
-## 0.2.9 — Router Home & IPv4 Input Fix
-- إصلاح اتصال الراوتر لفتح `http://<router-ip>/advance.asp` مباشرة بدلاً من `http://<router-ip>/`؛ المسار `/advance.asp` هو واجهة Tenda الرئيسية التي سبق التحقق منها، بينما أظهر تقرير المستخدم أن الجذر `/` أعاد صفحة `blank`.
-- إصلاح زر «الصفحة الرئيسية» ليعود إلى `/advance.asp`.
-- تغيير لوحة إدخال عنوان الراوتر إلى إدخال رقمي يقبل الأرقام والنقاط، لأن عنوان IPv4 يتطلب نقاطاً بين المقاطع.
-- توضيح أن الحقل يقبل IP فقط مثل `192.168.0.1`، ولا يقبل بروتوكول `http://` أو مسار `.asp`.
-- تشديد التحقق من IPv4 والتحقق من أن كل مقطع بين 0 و255.
-- لم يتغير `.github/workflows/android.yaml`.
-
-
-## 0.2.8 — Verified Router Paths
-- تصحيح اختصار MAC: يعتمد الآن على `Wireless > Access Control` والمسار المؤكد `/wireless_filter.asp`؛ أزيل المسار غير الصحيح `/firewall_macfilter.asp`.
-- فصل اختصار `Security > URL Filtering` عن تصفية MAC. المسار المؤكد من تقرير الراوتر هو `/firewall_urlfilter.asp`، وتعرض الصفحة نطاق IP ونص URL ووقت البداية والنهاية وأيام الأسبوع وخيار Enable.
-- تصحيح `Tools > Time Settings` إلى المسار الذي أعلنته قائمة الراوتر `/system_hostname.asp` بدلاً من `/system_time.asp`.
-- تحسين الرجوع إلى قوائم الراوتر: بعد الضغط على التبويب الرئيسي يتحقق التطبيق أولاً مما إذا كان التبويب قد فتح صفحة الهدف مباشرة، ثم يبحث عن الصفحة الفرعية عند الحاجة.
-- تحديث أسماء الاختصارات والشرح حتى لا توصف URL Filtering على أنها MAC Filtering.
-- لم تتم إضافة أي أوامر لتغيير إعدادات الراوتر؛ وظائف الإصدار للقراءة والتنقل فقط. يجب فحص حقول Time Settings على الجهاز قبل إضافة أي وظيفة تعديل.
-- بقي ملف `.github/workflows/android.yaml` دون تغيير.
-
-## 0.2.7 — Router Navigation & Device Association Fixes
-- إصلاح اختصارات صفحات الراوتر باستخدام مسارات المحتوى المحلية المعروفة بدلاً من الاعتماد حصراً على النقر النصي على القوائم.
-- التحقق من أن الإطار الداخلي وصل فعلياً إلى الصفحة المطلوبة، مع الرجوع إلى قائمة الراوتر عند فشل المسار المباشر.
-- إضافة اختصار مستقل إلى Wireless > Access Control للسماح أو منع الانضمام إلى شبكة Wi-Fi.
-- في هذه النسخة كان مسار Security يُعامل خطأً على أنه MAC Address Filter؛ تقرير Firmware الذي وصل لاحقاً أثبت أنه URL Filtering، وصُحح ذلك في 0.2.8.
-- دعم صفحات DHCP Client List وWireless Connection Status وWireless Access Control وBandwidth Control وTraffic Statistics وTime Settings؛ أما Security URL Filtering فتم تثبيت هويته ومساره في 0.2.8.
-- منع الجداول غير المرتبطة بالأجهزة في صفحات الراوتر العامة من الظهور على أنها سجلات أجهزة غير مصنفة.
-- الاحتفاظ بآخر ربط DHCP صالح بين MAC وIP محلياً لمدة 24 ساعة، مع تمييز العنوان التاريخي بوضوح وعدم عرضه على أنه IP حالي.
-- استخدام آخر ربط DHCP معروف لإثراء بطاقات Wi-Fi وTraffic Statistics عند غياب سجل DHCP حديث، مع توضيح أن MAC/IP من آخر سجل معروف.
-- تخصيص سجل DHCP المحفوظ لكل عنوان راوتر لتجنب خلط بيانات راوترين مختلفين.
-- لم تتم إضافة أي أوامر لتغيير إعدادات الراوتر؛ جميع وظائف هذا الإصدار للقراءة والتنقل فقط.
-- بقي ملف `.github/workflows/android.yaml` دون تعديل.
-
-## 0.2.6 — Live Traffic Monitor
-- إضافة مراقبة شبه لحظية لسرعات الرفع والتنزيل لكل IP.
-- إصلاح زر فتح QoS > Traffic Statistics باستخدام المسار المحلي المتحقق `/sys_iptAccount.asp`.
-- إعادة تحميل إطار `sys_iptAccount.asp` فقط ثم قراءة جدول Traffic Statistics.
-- فاصل تحديث قابل للتغيير: 3 أو 5 أو 10 ثوانٍ.
-- إضافة أزرار بدء وإيقاف وتحديث فوري.
-- إعادة المحاولة عند تأخر تحميل جدول الإحصائيات، والإيقاف بعد ثلاث محاولات فاشلة متتالية.
-- إبراز نشاط نقل البيانات لكل مشترك مع عدم مساواة سرعة الصفر بحالة الانقطاع.
-- إيقاف التحديث في الخلفية واستئنافه عند العودة.
+## 0.2.13 — Navigation Recovery
+- Restored the nested-frame fallback for router page navigation.
+- Open the Tenda top-level section before navigating to its child page, keeping the left navigation aligned with the content frame.
+- Retry the exact child-page link while the router menu loads; use the previous content-frame fallback if the link is not exposed.
+- Apply the same parent-first navigation to DHCP scans, Wireless scans, and Static Assignment DHCP reads.
+- No changes to subscriber live traffic parsing, dashboard UI, or router configuration writes.
+- `.github/workflows/android.yaml` preserved unchanged.
 

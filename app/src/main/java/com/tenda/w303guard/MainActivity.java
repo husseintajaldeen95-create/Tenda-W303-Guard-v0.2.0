@@ -370,7 +370,7 @@ public class MainActivity extends Activity {
         diagnosticView.setTextIsSelectable(true);
         diagnostics.addView(diagnosticView, matchWrap());
 
-        TextView footer = text("الإصدار 0.2.12: مزامنة قائمة الراوتر الجانبية مع الصفحة المفتوحة، مع الحفاظ على المراقبة اللحظية.", 12, true, MUTED);
+        TextView footer = text("الإصدار 0.2.11: قراءة حجوزات Static Assignment وفحص تعارض IP/MAC مع الحفاظ على المراقبة اللحظية للمشتركين.", 12, true, MUTED);
         footer.setPadding(dp(4), dp(12), dp(4), dp(4));
         root.addView(footer, matchWrap());
 
@@ -616,6 +616,77 @@ public class MainActivity extends Activity {
         return null;
     }
 
+    private void clickRouterPathLink(String targetPath, BooleanResult callback) {
+        String js = "(function(){" +
+                "var target=" + JSONObject.quote(targetPath) + ",current=false,links=[];" +
+                "var wins=[];" +
+                "function path(w){try{return new URL(w.location.href).pathname;}catch(e){return '';}}" +
+                "function walk(w,depth){try{wins.push({w:w,depth:depth,path:path(w)});for(var i=0;i<w.frames.length;i++){try{walk(w.frames[i],depth+1);}catch(e){}}}catch(e){}}" +
+                "walk(window,0);" +
+                "for(var i=0;i<wins.length;i++){" +
+                "if(wins[i].path===target)current=true;" +
+                "try{var as=wins[i].w.document.querySelectorAll('a[href]');" +
+                "for(var j=0;j<as.length;j++){try{" +
+                "var u=new URL(as[j].href,wins[i].w.location.href);" +
+                "if(u.pathname===target&&u.host===location.host)links.push({a:as[j],depth:wins[i].depth});" +
+                "}catch(e){}}}catch(e){}}" +
+                "links.sort(function(a,b){return b.depth-a.depth;});" +
+                "for(var k=0;k<links.length;k++){try{links[k].a.click();return true;}catch(e){}}" +
+                "return current;})()";
+        webView.evaluateJavascript(js, result -> callback.onResult("true".equals(result)));
+    }
+
+    private void clickRouterPathLinkWithRetry(String targetPath, int attempt, BooleanResult callback) {
+        clickRouterPathLink(targetPath, found -> {
+            if (found || attempt >= 3) {
+                callback.onResult(found);
+            } else {
+                handler.postDelayed(() -> clickRouterPathLinkWithRetry(targetPath, attempt + 1, callback), 400);
+            }
+        });
+    }
+
+    private void navigateRouterSectionPath(String parentLabel, String childLabel,
+                                           String targetPath, BooleanResult callback) {
+        if (targetPath == null) {
+            callback.onResult(false);
+            return;
+        }
+        clickRouterLabel(parentLabel, parentFound -> {
+            Runnable openChild = () -> handler.postDelayed(() ->
+                    clickRouterPathLinkWithRetry(targetPath, 0, linked -> {
+                        if (linked) {
+                            handler.postDelayed(() -> verifyRouterContentPath(targetPath, 0, callback), 650);
+                            return;
+                        }
+                        navigateRouterContentPath(targetPath, navigated -> {
+                            if (!navigated) {
+                                clickRouterLabelAny(childLabelAliases(childLabel), 0, childFound -> {
+                                    if (!childFound) {
+                                        callback.onResult(false);
+                                        return;
+                                    }
+                                    handler.postDelayed(() -> verifyRouterContentPath(targetPath, 0, callback), 650);
+                                });
+                                return;
+                            }
+                            handler.postDelayed(() -> verifyRouterContentPath(targetPath, 0, callback), 650);
+                        });
+                    }), 700);
+            if (parentFound) {
+                openChild.run();
+            } else {
+                navigateRouterContentPath(targetPath, navigated -> {
+                    if (!navigated) {
+                        callback.onResult(false);
+                        return;
+                    }
+                    handler.postDelayed(() -> verifyRouterContentPath(targetPath, 0, callback), 650);
+                });
+            }
+        });
+    }
+
     private void openRouterSection(String parentLabel, String childLabel) {
         if (webView == null || webView.getUrl() == null) {
             toast("اتصل بالراوتر وسجّل الدخول أولاً.");
@@ -626,19 +697,14 @@ public class MainActivity extends Activity {
             openRouterSectionByMenu(parentLabel, childLabel);
             return;
         }
-        status("أفتح " + parentLabel + " > " + childLabel + " بالمسار المحلي...");
-        navigateRouterContentPath(targetPath, navigated -> {
-            if (!navigated) {
-                openRouterSectionByMenu(parentLabel, childLabel);
-                return;
-            }
-            handler.postDelayed(() -> verifyRouterContentPath(targetPath, 0, verified -> {
-                if (!verified) {
-                    openRouterSectionByMenu(parentLabel, childLabel);
-                    return;
-                }
+        status("أفتح " + parentLabel + " > " + childLabel + " مع مزامنة قائمة الراوتر...");
+        navigateRouterSectionPath(parentLabel, childLabel, targetPath, verified -> {
+            if (verified) {
                 finishRouterSectionOpen(childLabel);
-            }), 650);
+            } else {
+                status("تعذر تأكيد فتح " + childLabel + ". لم أغيّر أي إعداد في الراوتر. أرسل تقرير الصفحة الحالية.");
+                inspectCurrentPage();
+            }
         });
     }
 
@@ -654,25 +720,37 @@ public class MainActivity extends Activity {
     }
 
     private void openRouterSectionByMenu(String parentLabel, String childLabel) {
+        String expectedPath = routerPagePath(parentLabel, childLabel);
+        if (expectedPath != null) {
+            navigateRouterSectionPath(parentLabel, childLabel, expectedPath, verified -> {
+                if (verified) {
+                    finishRouterSectionOpen(childLabel);
+                } else {
+                    status("تعذر فتح " + parentLabel + " > " + childLabel + ". افتحها يدوياً ثم أرسل تقرير الصفحة.");
+                    inspectCurrentPage();
+                }
+            });
+            return;
+        }
         clickRouterLabel(parentLabel, parentFound -> {
             if (!parentFound) {
                 status("لم أجد تبويب " + parentLabel + ". تأكد من تسجيل الدخول ثم أعد المحاولة.");
                 return;
             }
-            // Always activate the child through Tenda's own menu. This keeps the
-            // sidebar highlight synchronized even if the content frame is already
-            // showing the target URL.
-            handler.postDelayed(() -> clickRouterLabelAny(childLabelAliases(childLabel), 0, childFound -> {
-                if (!childFound) {
-                    status("فُتح " + parentLabel + " لكن لم أجد الصفحة الفرعية " + childLabel + ". افتحها يدوياً ثم أعد المحاولة.");
-                    return;
-                }
-                handler.postDelayed(() -> {
-                    String expectedPath = routerPagePath(parentLabel, childLabel);
-                    if (expectedPath == null) {
-                        finishRouterSectionOpen(childLabel);
-                        return;
-                    }
+            handler.postDelayed(() -> clickRouterChildFromMenu(parentLabel, childLabel, null), 850);
+        });
+    }
+
+    private void clickRouterChildFromMenu(String parentLabel, String childLabel, String expectedPath) {
+        clickRouterLabelAny(childLabelAliases(childLabel), 0, childFound -> {
+            if (!childFound) {
+                status("فُتح " + parentLabel + " لكن لم أجد الصفحة الفرعية " + childLabel + ". افتحها يدوياً ثم أعد المحاولة.");
+                return;
+            }
+            handler.postDelayed(() -> {
+                if (expectedPath == null) {
+                    finishRouterSectionOpen(childLabel);
+                } else {
                     verifyRouterContentPath(expectedPath, 0, verified -> {
                         if (verified) finishRouterSectionOpen(childLabel);
                         else {
@@ -680,8 +758,8 @@ public class MainActivity extends Activity {
                             inspectCurrentPage();
                         }
                     });
-                }, 900);
-            }), 850);
+                }
+            }, 900);
         });
     }
 
@@ -745,71 +823,43 @@ public class MainActivity extends Activity {
         }
         scanInProgress = true;
         if (scanAllButton != null) scanAllButton.setEnabled(false);
-        if (scanMetaView != null) scanMetaView.setText("المرحلة 1 من 2: فتح قائمة DHCP مباشرة...");
+        if (scanMetaView != null) scanMetaView.setText("المرحلة 1 من 2: فتح Advanced > DHCP Client List...");
         status("بدأ تحديث القائمتين. لن يتم تغيير أي إعداد في الراوتر.");
-        navigateRouterContentPath("/lan_dhcp_clients.asp", navigated -> {
-            if (!navigated) {
-                openRouterSectionByMenu("Advanced", "DHCP Client List");
-                handler.postDelayed(() -> verifyRouterContentPath("/lan_dhcp_clients.asp", 0, verified -> {
-                    if (!verified) {
-                        finishFullScan(false, "تعذر فتح DHCP Client List من قائمة الراوتر. افتحها يدوياً ثم أعد الفحص.");
-                        return;
-                    }
-                    handler.postDelayed(() -> readDevicesFromPage(() -> {
-                        if (scanMetaView != null) scanMetaView.setText("اكتملت قراءة DHCP. المرحلة 2 من 2: فتح قائمة Wi-Fi...");
-                        handler.postDelayed(this::scanWirelessStage, 450);
-                    }), 700);
-                }), 1400);
+        navigateRouterSectionPath("Advanced", "DHCP Client List", "/lan_dhcp_clients.asp", verified -> {
+            if (!verified) {
+                finishFullScan(false, "تعذر فتح DHCP Client List والتحقق من مساره. افتحها يدوياً ثم أعد الفحص.");
                 return;
             }
-            handler.postDelayed(() -> verifyRouterContentPath("/lan_dhcp_clients.asp", 0, verified -> {
-                if (!verified) {
-                    finishFullScan(false, "لم أتحقق من فتح DHCP Client List. افتح الصفحة من قائمة Advanced ثم أعد الفحص.");
-                    return;
-                }
-                handler.postDelayed(() -> readDevicesFromPage(() -> {
-                    if (scanMetaView != null) scanMetaView.setText("اكتملت قراءة DHCP. المرحلة 2 من 2: فتح قائمة Wi-Fi...");
-                    handler.postDelayed(this::scanWirelessStage, 450);
-                }), 700);
-            }), 550);
+            handler.postDelayed(() -> readDevicesFromPage(() -> {
+                if (scanMetaView != null) scanMetaView.setText("اكتملت قراءة DHCP. المرحلة 2 من 2: فتح قائمة Wi-Fi...");
+                handler.postDelayed(this::scanWirelessStage, 450);
+            }), 650);
         });
     }
+
 
     private void scanWirelessStage() {
         if (scanMetaView != null) {
             scanMetaView.setText("اكتملت قراءة DHCP. جارٍ فتح صفحة Wireless Connection Status...");
         }
-        navigateRouterContentPath("/wireless_state.asp", navigated -> {
-            if (!navigated) {
-                openWirelessStatusByMenu();
-                return;
+        navigateRouterSectionPath("Wireless", "Wireless Connection Status", "/wireless_state.asp", verified -> {
+            if (verified) {
+                status("تم فتح Wireless Connection Status. جارٍ قراءة الأجهزة...");
+                handler.postDelayed(this::readWirelessAndFinishScan, 650);
+            } else {
+                finishFullScan(false, "تعذر فتح Wireless Connection Status والتحقق من مساره. افتحها يدوياً ثم أعد الفحص.");
             }
-            handler.postDelayed(() -> verifyRouterContentPath("/wireless_state.asp", 0, verified -> {
-                if (verified) {
-                    status("تم فتح Wireless Connection Status. جارٍ قراءة الأجهزة...");
-                    handler.postDelayed(() -> readWirelessAndFinishScan(), 650);
-                } else {
-                    openWirelessStatusByMenu();
-                }
-            }), 550);
         });
     }
 
-    private void openWirelessStatusByMenu() {
-        clickRouterLabel("Wireless", parentFound -> {
-            if (!parentFound) {
-                finishFullScan(false, "تعذر فتح قسم Wireless. افتحه يدوياً ثم أعد الفحص.");
-                return;
-            }
-            handler.postDelayed(() -> clickRouterLabel("Wireless Connection Status", childFound -> {
-                if (!childFound) {
-                    finishFullScan(false, "تعذر فتح Wireless Connection Status. افتحها يدوياً ثم أعد الفحص.");
-                    return;
-                }
-                handler.postDelayed(this::readWirelessAndFinishScan, 1000);
-            }), 800);
+
+        private void openWirelessStatusByMenu() {
+        navigateRouterSectionPath("Wireless", "Wireless Connection Status", "/wireless_state.asp", verified -> {
+            if (verified) handler.postDelayed(this::readWirelessAndFinishScan, 650);
+            else finishFullScan(false, "تعذر فتح Wireless Connection Status. افتحها يدوياً ثم أعد الفحص.");
         });
     }
+
 
     private void readWirelessAndFinishScan() {
         readDevicesFromPage(() -> {
@@ -826,31 +876,34 @@ public class MainActivity extends Activity {
      * Returns false when no suitable frame or exact href is present.
      */
     private void navigateRouterContentPath(String targetPath, BooleanResult callback) {
-        // Always use the router's own menu link when available. Directly assigning
-        // frame.location.href changes the content frame but bypasses the router's
-        // menu-selection script, leaving the left navigation highlight stale.
-        // Do not return early when the target is already open: clicking its menu
-        // link again synchronizes the active menu item with the content frame.
         String js = "(function(){" +
                 "var target=" + JSONObject.quote(targetPath) + ";" +
                 "function path(w){try{return new URL(w.location.href).pathname;}catch(e){return '';}}" +
+                "function full(){try{return new URL(target,window.location.href).href;}catch(e){return location.protocol+'//'+location.host+target;}}" +
                 "var wins=[];" +
                 "function walk(w,depth){try{wins.push({w:w,depth:depth,path:path(w)});for(var i=0;i<w.frames.length;i++){try{walk(w.frames[i],depth+1);}catch(e){}}}catch(e){}}" +
                 "walk(window,0);" +
-                "var links=[];" +
+                "var current=false,links=[];" +
                 "for(var i=0;i<wins.length;i++){" +
-                "if(wins[i].path===target)continue;" +
+                "if(wins[i].path===target)current=true;" +
                 "try{var as=wins[i].w.document.querySelectorAll('a[href]');" +
                 "for(var j=0;j<as.length;j++){try{" +
                 "var u=new URL(as[j].href,wins[i].w.location.href);" +
                 "if(u.pathname===target&&u.host===location.host)links.push({a:as[j],depth:wins[i].depth});" +
                 "}catch(e){}}}catch(e){}}" +
-                "links.sort(function(a,b){return a.depth-b.depth;});" +
+                "links.sort(function(a,b){return b.depth-a.depth;});" +
                 "for(var k=0;k<links.length;k++){try{links[k].a.click();return true;}catch(e){}}" +
-                // No direct frame navigation fallback: callers use the visible menu.
+                "if(current)return true;" +
+                "var candidates=wins.filter(function(x){return x.depth>0&&x.path!=='/advance.asp'&&x.path!=='/index.asp'&&x.path!=='/';});" +
+                "candidates.sort(function(a,b){return b.depth-a.depth;});" +
+                "if(candidates.length){try{candidates[0].w.location.href=full();return true;}catch(e){}}" +
+                "var nested=wins.filter(function(x){return x.depth>0;});" +
+                "if(nested.length){try{nested[nested.length-1].w.location.href=full();return true;}catch(e){}}" +
+                "try{window.location.href=full();return true;}catch(e){}" +
                 "return false;})()";
         webView.evaluateJavascript(js, result -> callback.onResult("true".equals(result)));
     }
+
 
     private void finishFullScan(boolean success, String message) {
         scanInProgress = false;
@@ -1329,25 +1382,17 @@ public class MainActivity extends Activity {
         staticAssignmentSnapshot.clear();
         hasDhcpSnapshot = false;
         renderReservationCards();
-        navigateRouterContentPath("/lan_dhcp_clients.asp", navigated -> {
-            Runnable verifyAndRead = () -> handler.postDelayed(() ->
-                    verifyRouterContentPath("/lan_dhcp_clients.asp", 0, verified -> {
-                        if (!verified) {
-                            status("لم أتحقق من فتح DHCP Client List؛ لم أنفذ أي تغيير.");
-                            return;
-                        }
-                        handler.postDelayed(() -> readDevicesFromPage(() -> {
-                            if (completion != null) completion.run();
-                        }), 650);
-                    }), 500);
-            if (!navigated) {
-                openRouterSectionByMenu("Advanced", "DHCP Client List");
-                verifyAndRead.run();
+        navigateRouterSectionPath("Advanced", "DHCP Client List", "/lan_dhcp_clients.asp", verified -> {
+            if (!verified) {
+                status("لم أتحقق من فتح DHCP Client List؛ لم أنفذ أي تغيير.");
                 return;
             }
-            verifyAndRead.run();
+            handler.postDelayed(() -> readDevicesFromPage(() -> {
+                if (completion != null) completion.run();
+            }), 650);
         });
     }
+
 
     private void prepareStaticReservation() {
         String rawIp = reservationIpInput == null ? "" : reservationIpInput.getText().toString().trim();
