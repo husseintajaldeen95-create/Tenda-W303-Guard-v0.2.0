@@ -1,9 +1,17 @@
-## 0.2.17 — استعادة آلية التنقل السابقة مع إبقاء تدقيق MAC للقراءة فقط
-- أُعيدت آلية التنقل من v0.2.15 كما هي: اختيار التبويب من خلال روابط الراوتر الموجودة، ثم اختيار رابط الصفحة الفرعية المطابق للمسار، مع التحقق من المسار.
-- أُلغي منطق v0.2.16 الجديد الذي كان يبحث عن التبويب العلوي في المستند الرئيسي ثم يختار رابطاً من الإطارات الفرعية؛ لأنه تسبب في توجيه القوائم إلى صفحات غير صحيحة.
-- أُضيف مسار Security > MAC Address Filter Settings إلى `/firewall_mac.asp`.
-- أُبقي تقرير جدولة MAC الموسع للقراءة فقط. لا توجد أوامر حفظ أو تعديل أو POST تلقائي.
-- لم تُغيّر واجهة التطبيق أو المراقبة اللحظية أو منطق DHCP والحجوزات الثابتة.
+## 0.2.18 — MAC Schedule Auto Zero and Restore
+
+- Kept the v0.2.15 navigation implementation unchanged.
+- Added a separate MAC schedule automation panel; it does not replace or redesign existing router menus.
+- Reads the ten MAC policy slots through the router's existing `curNum` selector and `onChangeNum` handler.
+- Captures the original start time, MAC address, policy number, enabled state, weekday range, end time, and filter mode before any write.
+- Supports only the router's `Permit Only` mode and enabled policies with a valid MAC and a non-zero start time.
+- At each policy's own start time, changes only `sh` and `sm` to `00:00`; at 23:00 it restores that policy's original `sh` and `sm`.
+- Keeps end time, MAC address, policy name, days, Enable checkbox, and global Filter Mode unchanged.
+- Uses the router's Time Settings page as the clock source; if the clock cannot be parsed, no policy is changed.
+- Uses the firmware's existing `/goform/SafeMacFilter` POST and `preSubmit`/OK handler, then reloads and verifies each changed policy.
+- Persists original values and pending operations so an interrupted write can be recovered when the app reconnects.
+- Adds regression tests for per-policy start times, weekday ranges, and 23:00 restoration.
+- Automation requires the app to remain running and connected to the router; Android force-stop or process termination can prevent a scheduled action.
 
 ## 0.2.15 — MAC Schedule Form Audit (Read Only)
 - Expanded the current-page diagnostic to report form name/id/target/enctype and input event handlers.
