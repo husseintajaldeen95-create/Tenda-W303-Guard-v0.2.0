@@ -1,4 +1,4 @@
-# تدقيق نموذج جدولة MAC — v0.2.16 (قراءة فقط)
+# تدقيق نموذج جدولة MAC — v0.2.15 (قراءة فقط)
 
 ## الغرض
 استخراج تفاصيل النموذج الحقيقي ودوال JavaScript المسؤولة عن تغيير السياسة وحفظها، قبل كتابة أي أتمتة.
@@ -21,11 +21,3 @@
 1. افتح صفحة MAC Address Filter Settings.
 2. اضغط «فحص حقول الصفحة الحالية».
 3. اضغط «نسخ تقرير التشخيص» وأرسل التقرير كاملاً.
-
-
-## إضافات v0.2.16
-- `macSchedule.currentPolicy`: السياسة المحددة حالياً مع Filter Mode وPolicy Name وMAC segments ووقت البداية والنهاية والأيام وحالة Enable.
-- `macSchedule.policyChangeAttribute` و`macSchedule.policyChangeHandler`: معالج تغيير رقم السياسة `curNum` إن كان موجوداً.
-- `macSchedule.controls[].onChangeHandler`: مصدر معالج التغيير لكل عنصر، دون تشغيله.
-
-ما زال الفحص للقراءة فقط؛ لا تُشغّل دوال الراوتر ولا تضغط OK أو Clear ولا تُرسل POST.

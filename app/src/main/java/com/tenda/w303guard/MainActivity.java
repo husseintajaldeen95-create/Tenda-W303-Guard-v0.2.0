@@ -374,7 +374,7 @@ public class MainActivity extends Activity {
         diagnosticView.setTextIsSelectable(true);
         diagnostics.addView(diagnosticView, matchWrap());
 
-        TextView footer = text("الإصدار 0.2.15: فحص نموذج جدولة MAC ودواله للقراءة فقط، دون حفظ أي إعداد.", 12, true, MUTED);
+        TextView footer = text("الإصدار 0.2.17: استعادة التنقل السابق مع فحص جدولة MAC للقراءة فقط، دون حفظ أي إعداد.", 12, true, MUTED);
         footer.setPadding(dp(4), dp(12), dp(4), dp(4));
         root.addView(footer, matchWrap());
 
@@ -657,57 +657,37 @@ public class MainActivity extends Activity {
             callback.onResult(false);
             return;
         }
-        // Important: click the router's top tab first, then the matching item in
-        // its left navigation frame. Do not jump directly to the child URL here;
-        // doing so can change the content frame while leaving the left menu on a
-        // previous section (the mismatch shown in the user's screenshots).
-        clickRouterTopTab(parentLabel, parentFound -> {
-            if (!parentFound) {
-                callback.onResult(false);
-                return;
-            }
-            handler.postDelayed(() ->
-                    clickRouterChildMenu(targetPath, childLabelAliases(childLabel), 0, callback), 750);
-        });
-    }
-
-    private void clickRouterTopTab(String label, BooleanResult callback) {
-        String script = "(function(){" +
-                "function norm(s){return (s||'').replace(/\\s+/g,' ').trim().toLowerCase();}" +
-                "var q=" + JSONObject.quote(label.toLowerCase(Locale.ROOT)) + ";" +
-                "var es=document.querySelectorAll('a,button,input[type=button],input[type=submit],area,[onclick],[role=button],img[alt],[title]');" +
-                "for(var i=0;i<es.length;i++){var e=es[i],t=norm((e.innerText||e.textContent||e.value||'')+' '+(e.title||'')+' '+(e.alt||''));" +
-                "if(t===q||t.indexOf(q)>=0){var target=e.closest?e.closest('a,button,[onclick],[role=button]'):null;if(!target)target=e;" +
-                "try{target.scrollIntoView({block:'center'});}catch(x){};target.click();return true;}}return false;})()";
-        webView.evaluateJavascript(script, result -> callback.onResult("true".equals(result)));
-    }
-
-    private void clickRouterChildMenu(String targetPath, String[] labels, int attempt, BooleanResult callback) {
-        JSONArray labelArray = new JSONArray();
-        if (labels != null) for (String label : labels) labelArray.put(label.toLowerCase(Locale.ROOT));
-        String script = "(function(){" +
-                "var target=" + JSONObject.quote(targetPath) + ",labels=" + labelArray.toString() + ";" +
-                "function norm(s){return (s||'').replace(/\\s+/g,' ').trim().toLowerCase();}" +
-                "function path(w){try{return new URL(w.location.href).pathname;}catch(e){return '';}}" +
-                "var wins=[];function walk(w,depth){try{wins.push({w:w,depth:depth,path:path(w)});for(var i=0;i<w.frames.length;i++){try{walk(w.frames[i],depth+1);}catch(e){}}}catch(e){}}walk(window,0);" +
-                "var children=wins.filter(function(x){return x.depth>0;}).sort(function(a,b){return b.depth-a.depth;});" +
-                "for(var c=0;c<children.length;c++){try{var es=children[c].w.document.querySelectorAll('a[href]');" +
-                "for(var j=0;j<es.length;j++){try{var u=new URL(es[j].href,children[c].w.location.href);if(u.host===location.host&&u.pathname===target){es[j].click();return true;}}catch(e){}}}catch(e){}}" +
-                "for(var c=0;c<children.length;c++){try{var es=children[c].w.document.querySelectorAll('a,button,input[type=button],input[type=submit],area,[onclick],[role=button],img[alt],[title]');" +
-                "for(var j=0;j<es.length;j++){var e=es[j],t=norm((e.innerText||e.textContent||e.value||'')+' '+(e.title||'')+' '+(e.alt||''));" +
-                "for(var k=0;k<labels.length;k++){if(t===labels[k]||t.indexOf(labels[k])>=0){var a=e.closest?e.closest('a,button,[onclick],[role=button]'):null;if(!a)a=e;" +
-                "try{a.scrollIntoView({block:'center'});}catch(x){};a.click();return true;}}}}catch(e){}}return false;})()";
-        webView.evaluateJavascript(script, result -> {
-            if ("true".equals(result)) {
-                handler.postDelayed(() -> verifyRouterContentPath(targetPath, 0, verified -> {
-                    if (verified) callback.onResult(true);
-                    else if (attempt < 3) handler.postDelayed(() -> clickRouterChildMenu(targetPath, labels, attempt + 1, callback), 550);
-                    else callback.onResult(false);
-                }), 650);
-            } else if (attempt < 3) {
-                handler.postDelayed(() -> clickRouterChildMenu(targetPath, labels, attempt + 1, callback), 550);
+        clickRouterLabel(parentLabel, parentFound -> {
+            Runnable openChild = () -> handler.postDelayed(() ->
+                    clickRouterPathLinkWithRetry(targetPath, 0, linked -> {
+                        if (linked) {
+                            handler.postDelayed(() -> verifyRouterContentPath(targetPath, 0, callback), 650);
+                            return;
+                        }
+                        navigateRouterContentPath(targetPath, navigated -> {
+                            if (!navigated) {
+                                clickRouterLabelAny(childLabelAliases(childLabel), 0, childFound -> {
+                                    if (!childFound) {
+                                        callback.onResult(false);
+                                        return;
+                                    }
+                                    handler.postDelayed(() -> verifyRouterContentPath(targetPath, 0, callback), 650);
+                                });
+                                return;
+                            }
+                            handler.postDelayed(() -> verifyRouterContentPath(targetPath, 0, callback), 650);
+                        });
+                    }), 700);
+            if (parentFound) {
+                openChild.run();
             } else {
-                callback.onResult(false);
+                navigateRouterContentPath(targetPath, navigated -> {
+                    if (!navigated) {
+                        callback.onResult(false);
+                        return;
+                    }
+                    handler.postDelayed(() -> verifyRouterContentPath(targetPath, 0, callback), 650);
+                });
             }
         });
     }
