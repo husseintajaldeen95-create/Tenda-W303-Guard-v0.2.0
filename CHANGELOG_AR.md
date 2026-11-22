@@ -1,3 +1,11 @@
+## 0.2.16 — Frame Navigation Sync + MAC Schedule Audit
+- Added the verified Security > MAC Address Filter Settings route `/firewall_mac.asp`.
+- Navigation now selects the top-level router tab and then clicks the child item in the router's left menu before verifying the content-frame path.
+- Removed the direct-content navigation fallback from the verified-section flow because it could leave the left menu showing a different section from the content frame.
+- Expanded the read-only MAC audit with the current policy values and the `curNum` change-handler source.
+- Removed malformed duplicate workflow paths containing literal backslashes; kept `.github/workflows/android.yaml` unchanged.
+- No MAC policy values are written; no router POST is sent by this release. Automatic reset/restore is still pending validation of the policy-switch and save semantics.
+
 ## 0.2.15 — MAC Schedule Form Audit (Read Only)
 - Expanded the current-page diagnostic to report form name/id/target/enctype and input event handlers.
 - Added read-only capture of the MAC schedule page's `preSubmit`, `onSelected`, `onDel`, and `init` function source.

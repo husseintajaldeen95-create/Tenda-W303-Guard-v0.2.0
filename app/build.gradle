@@ -10,8 +10,8 @@ android {
         applicationId 'com.tenda.w303guard'
         minSdk 23
         targetSdk 28
-        versionCode 17
-        versionName '0.2.15-mac-schedule-form-audit'
+        versionCode 18
+        versionName '0.2.16-frame-sync-mac-audit'
     }
 
     compileOptions {

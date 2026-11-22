@@ -614,6 +614,7 @@ public class MainActivity extends Activity {
         if ("Wireless".equalsIgnoreCase(parentLabel) && "Access Control".equalsIgnoreCase(childLabel)) return "/wireless_filter.asp";
         if ("Security".equalsIgnoreCase(parentLabel) && ("URL Filtering".equalsIgnoreCase(childLabel)
                 || "URL Filter".equalsIgnoreCase(childLabel))) return "/firewall_urlfilter.asp";
+        if ("Security".equalsIgnoreCase(parentLabel) && "MAC Address Filter Settings".equalsIgnoreCase(childLabel)) return "/firewall_mac.asp";
         if ("Tools".equalsIgnoreCase(parentLabel) && "Time Settings".equalsIgnoreCase(childLabel)) return "/system_hostname.asp";
         if ("QoS".equalsIgnoreCase(parentLabel) && "Bandwidth Control".equalsIgnoreCase(childLabel)) return "/net_tc.asp";
         if ("QoS".equalsIgnoreCase(parentLabel) && "Traffic Statistics".equalsIgnoreCase(childLabel)) return "/sys_iptAccount.asp";
@@ -656,37 +657,57 @@ public class MainActivity extends Activity {
             callback.onResult(false);
             return;
         }
-        clickRouterLabel(parentLabel, parentFound -> {
-            Runnable openChild = () -> handler.postDelayed(() ->
-                    clickRouterPathLinkWithRetry(targetPath, 0, linked -> {
-                        if (linked) {
-                            handler.postDelayed(() -> verifyRouterContentPath(targetPath, 0, callback), 650);
-                            return;
-                        }
-                        navigateRouterContentPath(targetPath, navigated -> {
-                            if (!navigated) {
-                                clickRouterLabelAny(childLabelAliases(childLabel), 0, childFound -> {
-                                    if (!childFound) {
-                                        callback.onResult(false);
-                                        return;
-                                    }
-                                    handler.postDelayed(() -> verifyRouterContentPath(targetPath, 0, callback), 650);
-                                });
-                                return;
-                            }
-                            handler.postDelayed(() -> verifyRouterContentPath(targetPath, 0, callback), 650);
-                        });
-                    }), 700);
-            if (parentFound) {
-                openChild.run();
+        // Important: click the router's top tab first, then the matching item in
+        // its left navigation frame. Do not jump directly to the child URL here;
+        // doing so can change the content frame while leaving the left menu on a
+        // previous section (the mismatch shown in the user's screenshots).
+        clickRouterTopTab(parentLabel, parentFound -> {
+            if (!parentFound) {
+                callback.onResult(false);
+                return;
+            }
+            handler.postDelayed(() ->
+                    clickRouterChildMenu(targetPath, childLabelAliases(childLabel), 0, callback), 750);
+        });
+    }
+
+    private void clickRouterTopTab(String label, BooleanResult callback) {
+        String script = "(function(){" +
+                "function norm(s){return (s||'').replace(/\\s+/g,' ').trim().toLowerCase();}" +
+                "var q=" + JSONObject.quote(label.toLowerCase(Locale.ROOT)) + ";" +
+                "var es=document.querySelectorAll('a,button,input[type=button],input[type=submit],area,[onclick],[role=button],img[alt],[title]');" +
+                "for(var i=0;i<es.length;i++){var e=es[i],t=norm((e.innerText||e.textContent||e.value||'')+' '+(e.title||'')+' '+(e.alt||''));" +
+                "if(t===q||t.indexOf(q)>=0){var target=e.closest?e.closest('a,button,[onclick],[role=button]'):null;if(!target)target=e;" +
+                "try{target.scrollIntoView({block:'center'});}catch(x){};target.click();return true;}}return false;})()";
+        webView.evaluateJavascript(script, result -> callback.onResult("true".equals(result)));
+    }
+
+    private void clickRouterChildMenu(String targetPath, String[] labels, int attempt, BooleanResult callback) {
+        JSONArray labelArray = new JSONArray();
+        if (labels != null) for (String label : labels) labelArray.put(label.toLowerCase(Locale.ROOT));
+        String script = "(function(){" +
+                "var target=" + JSONObject.quote(targetPath) + ",labels=" + labelArray.toString() + ";" +
+                "function norm(s){return (s||'').replace(/\\s+/g,' ').trim().toLowerCase();}" +
+                "function path(w){try{return new URL(w.location.href).pathname;}catch(e){return '';}}" +
+                "var wins=[];function walk(w,depth){try{wins.push({w:w,depth:depth,path:path(w)});for(var i=0;i<w.frames.length;i++){try{walk(w.frames[i],depth+1);}catch(e){}}}catch(e){}}walk(window,0);" +
+                "var children=wins.filter(function(x){return x.depth>0;}).sort(function(a,b){return b.depth-a.depth;});" +
+                "for(var c=0;c<children.length;c++){try{var es=children[c].w.document.querySelectorAll('a[href]');" +
+                "for(var j=0;j<es.length;j++){try{var u=new URL(es[j].href,children[c].w.location.href);if(u.host===location.host&&u.pathname===target){es[j].click();return true;}}catch(e){}}}catch(e){}}" +
+                "for(var c=0;c<children.length;c++){try{var es=children[c].w.document.querySelectorAll('a,button,input[type=button],input[type=submit],area,[onclick],[role=button],img[alt],[title]');" +
+                "for(var j=0;j<es.length;j++){var e=es[j],t=norm((e.innerText||e.textContent||e.value||'')+' '+(e.title||'')+' '+(e.alt||''));" +
+                "for(var k=0;k<labels.length;k++){if(t===labels[k]||t.indexOf(labels[k])>=0){var a=e.closest?e.closest('a,button,[onclick],[role=button]'):null;if(!a)a=e;" +
+                "try{a.scrollIntoView({block:'center'});}catch(x){};a.click();return true;}}}}catch(e){}}return false;})()";
+        webView.evaluateJavascript(script, result -> {
+            if ("true".equals(result)) {
+                handler.postDelayed(() -> verifyRouterContentPath(targetPath, 0, verified -> {
+                    if (verified) callback.onResult(true);
+                    else if (attempt < 3) handler.postDelayed(() -> clickRouterChildMenu(targetPath, labels, attempt + 1, callback), 550);
+                    else callback.onResult(false);
+                }), 650);
+            } else if (attempt < 3) {
+                handler.postDelayed(() -> clickRouterChildMenu(targetPath, labels, attempt + 1, callback), 550);
             } else {
-                navigateRouterContentPath(targetPath, navigated -> {
-                    if (!navigated) {
-                        callback.onResult(false);
-                        return;
-                    }
-                    handler.postDelayed(() -> verifyRouterContentPath(targetPath, 0, callback), 650);
-                });
+                callback.onResult(false);
             }
         });
     }
@@ -1290,8 +1311,8 @@ public class MainActivity extends Activity {
                 "if(c.tagName==='SELECT'){z.options=[];for(var n=0;n<c.options.length&&n<50;n++){z.options.push({text:c.options[n].text,value:c.options[n].value});}}ob.fields.push(z);}o.forms.push(ob);}" +
                 "if(framePath==='/firewall_mac.asp'){var ms={frame:framePath,functions:{},policyOptions:[],formName:'',formId:'',formAction:'',formMethod:'',controls:[]};" +
                 "var fnNames=['preSubmit','onSelected','onDel','init'];for(var q=0;q<fnNames.length;q++){var fnName=fnNames[q];try{var fn=d.defaultView[fnName];ms.functions[fnName]=typeof fn==='function'?fn.toString().slice(0,6000):'غير موجود';}catch(e){ms.functions[fnName]='تعذر القراءة';}}" +
-                "var policy=d.getElementById('curNum');if(policy){for(var po=0;po<policy.options.length&&po<20;po++){ms.policyOptions.push({text:policy.options[po].text,value:policy.options[po].value});}}" +
-                "var mf=d.forms['frmSetup']||d.querySelector('form');if(mf){ms.formName=mf.name||'';ms.formId=mf.id||'';ms.formAction=pathOnly(mf.action||'');ms.formMethod=mf.method||'';var mc=mf.querySelectorAll('input,select,textarea,button');for(var mi=0;mi<mc.length&&mi<100;mi++){var el=mc[mi],et=(el.type||'').toLowerCase(),en=(el.name||'')+' '+(el.id||''),hide=et==='password'||et==='hidden'||/(pass|token|cookie|auth|session|key|csrf|stok)/i.test(en);ms.controls.push({tag:el.tagName.toLowerCase(),type:et,name:el.name||'',id:el.id||'',value:hide?'[محجوب]':(el.value||''),checked:el.type==='checkbox'?!!el.checked:undefined,onChange:(el.getAttribute('onchange')||'').slice(0,500),onClick:(el.getAttribute('onclick')||'').slice(0,500)});}}" +
+                "var policy=d.getElementById('curNum');if(policy){ms.selectedPolicy=policy.value;ms.policyChangeAttribute=(policy.getAttribute('onchange')||'').slice(0,1000);try{ms.policyChangeHandler=typeof policy.onchange==='function'?policy.onchange.toString().slice(0,3000):'';}catch(e){ms.policyChangeHandler='تعذر القراءة';}for(var po=0;po<policy.options.length&&po<20;po++){ms.policyOptions.push({text:policy.options[po].text,value:policy.options[po].value});}}" +
+                "var mf=d.forms['frmSetup']||d.querySelector('form');if(mf){ms.formName=mf.name||'';ms.formId=mf.id||'';ms.formAction=pathOnly(mf.action||'');ms.formMethod=mf.method||'';ms.formOnSubmit=(mf.getAttribute('onsubmit')||'').slice(0,1000);var macParts=mf.querySelectorAll('input[id=\"mac\"]');var macValues=[];for(var mp=0;mp<macParts.length;mp++)macValues.push(macParts[mp].value||'');ms.currentPolicy={number:policy?policy.value:'',filterMode:(mf.querySelector('#filter_mode')||{}).value||'',name:(mf.querySelector('#remark')||{}).value||'',macParts:macValues,startHour:(mf.querySelector('#sh')||{}).value||'',startMinute:(mf.querySelector('#sm')||{}).value||'',endHour:(mf.querySelector('#eh')||{}).value||'',endMinute:(mf.querySelector('#em')||{}).value||'',startDay:(mf.querySelector('#startw')||{}).value||'',endDay:(mf.querySelector('#endw')||{}).value||'',enabled:!!(mf.querySelector('#en')&&mf.querySelector('#en').checked)};var mc=mf.querySelectorAll('input,select,textarea,button');for(var mi=0;mi<mc.length&&mi<100;mi++){var el=mc[mi],et=(el.type||'').toLowerCase(),en=(el.name||'')+' '+(el.id||''),hide=et==='password'||et==='hidden'||/(pass|token|cookie|auth|session|key|csrf|stok)/i.test(en);ms.controls.push({tag:el.tagName.toLowerCase(),type:et,name:el.name||'',id:el.id||'',value:hide?'[محجوب]':(el.value||''),checked:el.type==='checkbox'?!!el.checked:undefined,onChange:(el.getAttribute('onchange')||'').slice(0,1000),onChangeHandler:(typeof el.onchange==='function'?el.onchange.toString().slice(0,3000):''),onClick:(el.getAttribute('onclick')||'').slice(0,500)});}}" +
                 "o.macSchedule.push(ms);}" +
                 "var ts=d.querySelectorAll('table');for(var t=0;t<ts.length&&o.tables.length<40;t++){var tab=ts[t],rs=tab.querySelectorAll('tr'),headers=[],headerAt=-1,preview=[];for(var r=0;r<rs.length;r++){var cc=Array.prototype.slice.call(rs[r].querySelectorAll('th,td')).map(txt);var joined=cc.join(' ').toLowerCase();if((joined.indexOf('host name')>=0&&joined.indexOf('lease time')>=0)||(joined.indexOf('mac address')>=0&&joined.indexOf('bandwidth')>=0)||(joined.indexOf('ip address')>=0&&joined.indexOf('uplink')>=0&&joined.indexOf('downlink')>=0)){headers=cc;headerAt=r;break;}}if(headerAt<0&&rs.length>0){headers=Array.prototype.slice.call(rs[0].querySelectorAll('th,td')).map(txt);headerAt=0;}var maxRows=framePath==='/firewall_mac.asp'?20:5;for(var pr=headerAt+1;pr<rs.length&&preview.length<maxRows;pr++){var vals=Array.prototype.slice.call(rs[pr].querySelectorAll('th,td')).map(txt);if(vals.length)preview.push(vals);}o.tables.push({frame:framePath,headers:headers,rowCount:rs.length,previewRows:preview});}}" +
                 "TendaBridge.diagnostic(JSON.stringify(o));return 'ok';})()";
