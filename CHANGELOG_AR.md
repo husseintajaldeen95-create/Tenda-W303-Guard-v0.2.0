@@ -1,3 +1,15 @@
+## 0.2.20 — Background Traffic Monitor and Network Recovery
+
+- Added an Android foreground service with an independent WebView for `QoS > Traffic Statistics`.
+- Watches Wi-Fi transport and the local router endpoint; it does not require validated WAN Internet.
+- Keeps the service alive while Wi-Fi is disconnected and retries router reachability after Wi-Fi/router recovery.
+- Retries missing Traffic Statistics tables instead of stopping after three failed reads.
+- Persists the latest traffic snapshot and its capture time for display when the Activity returns.
+- Adds an ongoing notification with a Stop action, CPU/Wi-Fi locks while connected to the router, releases locks while waiting for Wi-Fi, and boot-time restart when the user had enabled monitoring.
+- Preserves the existing Activity traffic parser, DHCP/Wireless readers, static IP reservation logic, MAC schedule engine, navigation mappings, and `.github/workflows/android.yaml`.
+- MAC schedule automation remains Activity/WebView-bound; this release does not claim it survives Force stop or Activity task removal.
+- APK build and real-router background behavior still require GitHub Actions and on-device verification.
+
 ## 0.2.19 — Restore v0.2.17 router navigation mapping
 
 - Restored the exact `Security > MAC Address Filter Settings` route mapping from v0.2.17: `/firewall_mac.asp`.

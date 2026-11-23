@@ -5,11 +5,15 @@ import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.BroadcastReceiver;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
@@ -142,6 +146,33 @@ public class MainActivity extends Activity {
     private final int[] livePollIntervalsMs = new int[]{3000, 5000, 10000};
     private int livePollIntervalIndex = 0;
     private final Runnable liveMonitorRunnable = this::runLiveMonitorCycle;
+    private boolean monitorReceiverRegistered = false;
+    private final BroadcastReceiver backgroundMonitorReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (intent == null) return;
+            String action = intent.getAction();
+            if (RouterBackgroundService.ACTION_STATUS.equals(action)) {
+                liveMonitorRunning = intent.getBooleanExtra(RouterBackgroundService.EXTRA_RUNNING, false);
+                String message = intent.getStringExtra(RouterBackgroundService.EXTRA_STATUS);
+                if (liveStatusView != null && message != null) liveStatusView.setText(message);
+                updateLiveControls();
+            } else if (RouterBackgroundService.ACTION_TRAFFIC.equals(action)) {
+                String json = intent.getStringExtra(RouterBackgroundService.EXTRA_JSON);
+                String source = intent.getStringExtra(RouterBackgroundService.EXTRA_SOURCE_PATH);
+                if (json != null) {
+                    renderTrafficStatistics(json, source);
+                    trafficSnapshotAt = intent.getLongExtra(RouterBackgroundService.EXTRA_CAPTURED_AT,
+                            System.currentTimeMillis());
+                    renderTrafficCards();
+                }
+                if (liveStatusView != null) {
+                    liveStatusView.setText("مراقبة الخلفية تعمل • آخر تحديث: " + formatTime(trafficSnapshotAt)
+                            + " • الفاصل: " + (livePollIntervalMs / 1000) + " ثوانٍ");
+                }
+            }
+        }
+    };
     private boolean hasDhcpSnapshot = false;
     private boolean hasWirelessSnapshot = false;
     private long dhcpSnapshotAt = 0L;
@@ -166,9 +197,20 @@ public class MainActivity extends Activity {
         preferences = getSharedPreferences("tenda_w303_guard", MODE_PRIVATE);
         activeHost = preferences.getString("router_ip", DEFAULT_ROUTER);
         macAutomationRunning = preferences.getBoolean(PREF_MAC_AUTO_ENABLED, false);
+        liveMonitorRunning = preferences.getBoolean(RouterBackgroundService.PREF_ENABLED, false);
+        livePollIntervalMs = normalizeLivePollInterval(preferences.getInt(
+                RouterBackgroundService.PREF_INTERVAL_MS, 3000));
+        for (int i = 0; i < livePollIntervalsMs.length; i++) {
+            if (livePollIntervalsMs[i] == livePollIntervalMs) livePollIntervalIndex = i;
+        }
         loadDhcpHistory();
         buildUi();
+        if (liveIntervalButton != null) {
+            liveIntervalButton.setText("فاصل التحديث: " + (livePollIntervalMs / 1000) + " ثوانٍ");
+        }
         configureWebView();
+        updateLiveControls();
+        restoreLastTrafficSnapshot();
         updateMacAutomationUi(macAutomationRunning
                 ? "الأتمتة محفوظة ومفعّلة؛ اتصل بالراوتر لاستكمال الجدولة."
                 : "التصفير التلقائي متوقف. اتصل بالراوتر ثم ابدأ التشغيل.");
@@ -251,9 +293,9 @@ public class MainActivity extends Activity {
         gap(root, 10);
         LinearLayout trafficCard = card(root);
         trafficCard.addView(text("المراقبة اللحظية للمشتركين - Traffic Statistics", 18, true, DARK), matchWrap());
-        trafficCard.addView(text("الأولوية هنا لسرعة الرفع والتنزيل الحالية لكل مشترك. يقوم التطبيق بتحديث إطار Traffic Statistics داخل الراوتر تلقائياً ثم يعيد قراءة الجدول.", 12, false, MUTED), matchWrap());
+        trafficCard.addView(text("الأولوية لسرعة الرفع والتنزيل الحالية لكل مشترك. تعمل المراقبة في خدمة Android مستقلة، وتنتظر عودة Wi-Fi أو الراوتر تلقائياً. لا تحتاج إلى إنترنت خارجي ما دام الهاتف متصلاً محلياً بالراوتر.", 12, false, MUTED), matchWrap());
 
-        liveStatusView = text("المراقبة متوقفة. افتح QoS ثم Traffic Statistics واضغط بدء المراقبة الحية.", 12, true, MUTED);
+        liveStatusView = text("المراقبة متوقفة. يمكنك تشغيلها الآن لتنتظر Wi-Fi والراوتر تلقائياً؛ يلزم تسجيل الدخول إلى الراوتر مرة واحدة إذا طُلبت المصادقة.", 12, true, MUTED);
         liveStatusView.setPadding(0, dp(7), 0, dp(7));
         trafficCard.addView(liveStatusView, matchWrap());
 
@@ -263,7 +305,7 @@ public class MainActivity extends Activity {
 
         LinearLayout liveControls = new LinearLayout(this);
         liveControls.setOrientation(LinearLayout.HORIZONTAL);
-        liveStartButton = button("بدء المراقبة الحية", true);
+        liveStartButton = button("بدء المراقبة الحية في الخلفية", true);
         liveStartButton.setOnClickListener(v -> startLiveMonitoring());
         liveStopButton = button("إيقاف", false);
         liveStopButton.setEnabled(false);
@@ -433,7 +475,7 @@ public class MainActivity extends Activity {
         diagnosticView.setTextIsSelectable(true);
         diagnostics.addView(diagnosticView, matchWrap());
 
-        TextView footer = text("الإصدار 0.2.19: استعادة ربط صفحات التنقل كما في 0.2.17 مع إبقاء التصفير التلقائي لسياسات MAC.", 12, true, MUTED);
+        TextView footer = text("الإصدار 0.2.20: مراقبة Traffic Statistics في الخلفية وانتظار عودة Wi-Fi والراوتر تلقائياً.", 12, true, MUTED);
         footer.setPadding(dp(4), dp(12), dp(4), dp(4));
         root.addView(footer, matchWrap());
 
@@ -501,6 +543,11 @@ public class MainActivity extends Activity {
                 pageView.setText("الصفحة الحالية: " + url);
                 if (!isAllowedRouterUri(Uri.parse(url))) return;
                 status("تم تحميل صفحة الراوتر. إذا ظهرت شاشة الدخول، سجّل الدخول من داخلها.");
+                if (liveMonitorRunning) {
+                    Intent retryBackgroundAuth = new Intent(MainActivity.this, RouterBackgroundService.class)
+                            .setAction(RouterBackgroundService.ACTION_RETRY_AUTH);
+                    startService(retryBackgroundAuth);
+                }
                 // Inspect the loaded router page and refresh Traffic Statistics if
                 // its table is present. Device lists are read explicitly by the page
                 // shortcuts or by the sequential DHCP/Wi-Fi scan to avoid racing frames.
@@ -536,11 +583,13 @@ public class MainActivity extends Activity {
     }
 
     private void connectToRouter() {
-        if (liveMonitorRunning) stopLiveMonitoring("توقفت المراقبة بسبب إعادة الاتصال بالراوتر.");
         String ip = routerIp.getText().toString().trim();
         if (!isPrivateIpv4(ip)) {
             toast("أدخل عنوان IPv4 محلياً صحيحاً، مثل 192.168.0.1");
             return;
+        }
+        if (liveMonitorRunning && !ip.equals(activeHost)) {
+            stopLiveMonitoring("أوقفت المراقبة لأن عنوان الراوتر تغيّر.");
         }
         activeHost = ip;
         preferences.edit().putString("router_ip", ip).apply();
@@ -1153,28 +1202,51 @@ public class MainActivity extends Activity {
     }
 
     private void startLiveMonitoring() {
-        if (webView == null || webView.getUrl() == null) {
-            toast("اتصل بالراوتر أولاً.");
-            return;
-        }
         if (liveMonitorRunning) {
-            toast("المراقبة الحية تعمل بالفعل.");
+            toast("المراقبة الخلفية تعمل بالفعل.");
             return;
         }
-        liveMonitorRunning = true;
-        liveCycleBusy = false;
-        liveConsecutiveMisses = 0;
-        updateLiveControls();
-        if (liveStatusView != null) liveStatusView.setText("جارٍ بدء المراقبة الحية والبحث عن إطار Traffic Statistics...");
-        status("بدأت المراقبة شبه اللحظية. سيتم تحديث إطار الإحصائيات كل " + (livePollIntervalMs / 1000) + " ثوانٍ.");
-        handler.removeCallbacks(liveMonitorRunnable);
-        handler.post(liveMonitorRunnable);
+        String requestedHost = routerIp == null ? activeHost : routerIp.getText().toString().trim();
+        if (!isPrivateIpv4(requestedHost)) {
+            toast("أدخل عنوان الراوتر المحلي الصحيح أولاً، مثل 192.168.0.1");
+            return;
+        }
+        activeHost = requestedHost;
+        preferences.edit()
+                .putBoolean(RouterBackgroundService.PREF_ENABLED, true)
+                .putString("router_ip", activeHost)
+                .putInt(RouterBackgroundService.PREF_INTERVAL_MS, livePollIntervalMs)
+                .apply();
+
+        Intent service = new Intent(this, RouterBackgroundService.class)
+                .setAction(RouterBackgroundService.ACTION_START)
+                .putExtra(RouterBackgroundService.EXTRA_ROUTER_HOST, activeHost)
+                .putExtra(RouterBackgroundService.EXTRA_INTERVAL_MS, livePollIntervalMs);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(service);
+            else startService(service);
+            liveMonitorRunning = true;
+            liveCycleBusy = false;
+            liveConsecutiveMisses = 0;
+            updateLiveControls();
+            if (liveStatusView != null) {
+                liveStatusView.setText("خدمة المراقبة الخلفية بدأت. أنتظر الراوتر المحلي وأعيد المحاولة تلقائياً عند الانقطاع.");
+            }
+            status("بدأت مراقبة Traffic Statistics في الخلفية.");
+        } catch (Exception e) {
+            liveMonitorRunning = false;
+            preferences.edit().putBoolean(RouterBackgroundService.PREF_ENABLED, false).apply();
+            updateLiveControls();
+            toast("تعذر تشغيل خدمة الخلفية: " + (e.getMessage() == null ? "خطأ غير معروف" : e.getMessage()));
+        }
     }
 
     private void stopLiveMonitoring(String reason) {
         liveMonitorRunning = false;
         liveCycleBusy = false;
+        preferences.edit().putBoolean(RouterBackgroundService.PREF_ENABLED, false).apply();
         handler.removeCallbacks(liveMonitorRunnable);
+        stopService(new Intent(this, RouterBackgroundService.class));
         updateLiveControls();
         if (liveStatusView != null) liveStatusView.setText(reason + " آخر قراءة ناجحة: " +
                 (trafficSnapshotAt > 0 ? formatTime(trafficSnapshotAt) : "غير متاحة"));
@@ -1184,12 +1256,52 @@ public class MainActivity extends Activity {
     private void cycleLivePollInterval() {
         livePollIntervalIndex = (livePollIntervalIndex + 1) % livePollIntervalsMs.length;
         livePollIntervalMs = livePollIntervalsMs[livePollIntervalIndex];
+        preferences.edit().putInt(RouterBackgroundService.PREF_INTERVAL_MS, livePollIntervalMs).apply();
         if (liveIntervalButton != null) {
             liveIntervalButton.setText("فاصل التحديث: " + (livePollIntervalMs / 1000) + " ثوانٍ");
         }
-        if (liveMonitorRunning && !liveCycleBusy) {
-            handler.removeCallbacks(liveMonitorRunnable);
-            handler.postDelayed(liveMonitorRunnable, livePollIntervalMs);
+        if (liveMonitorRunning) {
+            Intent update = new Intent(this, RouterBackgroundService.class)
+                    .setAction(RouterBackgroundService.ACTION_UPDATE_INTERVAL)
+                    .putExtra(RouterBackgroundService.EXTRA_INTERVAL_MS, livePollIntervalMs);
+            startService(update);
+        }
+    }
+
+    private int normalizeLivePollInterval(int value) {
+        return value == 5000 || value == 10000 ? value : 3000;
+    }
+
+    private void restoreLastTrafficSnapshot() {
+        if (preferences == null || trafficCards == null) return;
+        String json = preferences.getString(RouterBackgroundService.PREF_LAST_TRAFFIC_JSON, "");
+        if (json == null || json.trim().isEmpty()) return;
+        String source = preferences.getString(RouterBackgroundService.PREF_LAST_TRAFFIC_SOURCE, "");
+        renderTrafficStatistics(json, source);
+        long savedAt = preferences.getLong(RouterBackgroundService.PREF_LAST_TRAFFIC_AT, 0L);
+        if (savedAt > 0L) {
+            trafficSnapshotAt = savedAt;
+            renderTrafficCards();
+            if (liveStatusView != null) {
+                liveStatusView.setText((liveMonitorRunning ? "المراقبة الخلفية مفعّلة" : "آخر قراءة محفوظة")
+                        + " • وقت القراءة: " + formatTime(savedAt));
+            }
+        }
+    }
+
+    private void ensureBackgroundMonitorStarted() {
+        if (preferences == null || !preferences.getBoolean(RouterBackgroundService.PREF_ENABLED, false)) return;
+        liveMonitorRunning = true;
+        updateLiveControls();
+        Intent service = new Intent(this, RouterBackgroundService.class)
+                .setAction(RouterBackgroundService.ACTION_START)
+                .putExtra(RouterBackgroundService.EXTRA_ROUTER_HOST, activeHost)
+                .putExtra(RouterBackgroundService.EXTRA_INTERVAL_MS, livePollIntervalMs);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(service);
+            else startService(service);
+        } catch (Exception e) {
+            if (liveStatusView != null) liveStatusView.setText("المراقبة محفوظة، لكن تعذر إعادة تشغيل خدمة الخلفية. افتح التطبيق وابدأها مجدداً.");
         }
     }
 
@@ -2742,30 +2854,43 @@ public class MainActivity extends Activity {
     }
 
     @Override
-    protected void onPause() {
-        super.onPause();
-        if (liveMonitorRunning) {
-            liveLifecyclePaused = true;
-            liveCycleBusy = false;
-            handler.removeCallbacks(liveMonitorRunnable);
-            if (liveStatusView != null) liveStatusView.setText("المراقبة الحية متوقفة مؤقتاً لأن التطبيق في الخلفية.");
-        }
+    protected void onStart() {
+        super.onStart();
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(RouterBackgroundService.ACTION_STATUS);
+        filter.addAction(RouterBackgroundService.ACTION_TRAFFIC);
+        try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(backgroundMonitorReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(backgroundMonitorReceiver, filter);
+            }
+            monitorReceiverRegistered = true;
+        } catch (Exception ignored) { }
+        ensureBackgroundMonitorStarted();
+        restoreLastTrafficSnapshot();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        if (liveMonitorRunning) {
-            liveLifecyclePaused = false;
-            liveCycleBusy = false;
-            handler.removeCallbacks(liveMonitorRunnable);
-            handler.post(liveMonitorRunnable);
-            if (liveStatusView != null) liveStatusView.setText("استؤنفت المراقبة الحية...");
-        }
+        liveMonitorRunning = preferences.getBoolean(RouterBackgroundService.PREF_ENABLED, false);
+        updateLiveControls();
+        restoreLastTrafficSnapshot();
         if (macAutomationRunning && webView != null && webView.getUrl() != null) {
             handler.removeCallbacks(macAutomationRunnable);
             handler.post(macAutomationRunnable);
         }
+    }
+
+    @Override
+    protected void onStop() {
+        if (monitorReceiverRegistered) {
+            try { unregisterReceiver(backgroundMonitorReceiver); }
+            catch (Exception ignored) { }
+            monitorReceiverRegistered = false;
+        }
+        super.onStop();
     }
 
     @Override
@@ -2776,7 +2901,6 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        liveMonitorRunning = false;
         handler.removeCallbacks(liveMonitorRunnable);
         handler.removeCallbacks(macAutomationRunnable);
         if (webView != null) {
@@ -2786,7 +2910,7 @@ public class MainActivity extends Activity {
             webView.destroy();
             webView = null;
         }
-        CookieManager.getInstance().removeAllCookies(null);
+        // Keep the local router session cookies available to RouterBackgroundService.
         CookieManager.getInstance().flush();
         super.onDestroy();
     }
