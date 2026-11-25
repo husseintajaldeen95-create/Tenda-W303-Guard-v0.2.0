@@ -12,6 +12,8 @@ public final class MacScheduleLogicTest {
         restoresOnlyModifiedPoliciesAt2355OrNextDate();
         countsSameTimePoliciesAsSeparateSlots();
         countsSameTimePolicySlotsByNumberNotByTime();
+        countsAllTenPolicySlotsIndependently();
+        keepsAutomationActiveWhenNoPolicyIsEligible();
         System.out.println("MAC schedule logic tests: " + passed + " passed.");
     }
 
@@ -78,6 +80,28 @@ public final class MacScheduleLogicTest {
                 "three policies at 16:00 remain three separate policies");
         check(unique.get(3).number == 4 && unique.get(4).number == 5,
                 "two policies at 18:00 remain two separate policies");
+    }
+
+
+    private static void countsAllTenPolicySlotsIndependently() {
+        java.util.List<MacScheduleLogic.PolicySlot> slots = new java.util.ArrayList<>();
+        for (int number = 1; number <= 10; number++) {
+            slots.add(new MacScheduleLogic.PolicySlot(number, 16 * 60));
+        }
+        java.util.List<MacScheduleLogic.PolicySlot> unique = MacScheduleLogic.uniquePolicySlots(slots);
+        check(unique.size() == 10, "all ten policy slots remain ten even when every start time is identical");
+        check(unique.get(9).number == 10, "the tenth policy slot is retained independently");
+    }
+
+    private static void keepsAutomationActiveWhenNoPolicyIsEligible() {
+        check(MacScheduleLogic.shouldKeepAutomationTaskActive(true, false, false),
+                "user-enabled automation remains active when the current scan has zero eligible policies");
+        check(MacScheduleLogic.shouldKeepAutomationTaskActive(false, true, false),
+                "the service remains active while an explicit stop/restore phase is pending");
+        check(MacScheduleLogic.shouldKeepAutomationTaskActive(false, false, true),
+                "the service remains active while a policy still needs restoration");
+        check(!MacScheduleLogic.shouldKeepAutomationTaskActive(false, false, false),
+                "the MAC task can stop when disabled and no restoration is pending");
     }
 
     private static void check(boolean ok, String message) {

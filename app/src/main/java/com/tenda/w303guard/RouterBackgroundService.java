@@ -17,6 +17,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.os.SystemClock;
 import android.webkit.CookieManager;
 import android.webkit.HttpAuthHandler;
 import android.webkit.JavascriptInterface;
@@ -118,6 +119,7 @@ public class RouterBackgroundService extends Service {
     private boolean macAutomationStopping = false;
     private int macAutomationZeroedCount = 0;
     private int macAutomationRestoredCount = 0;
+    private long macAutomationCycleStartedAt = 0L;
     private String macAutomationStatus = "أتمتة MAC غير مفعّلة.";
     private final Runnable macAutomationRunnable = this::runMacAutomationCycle;
     private final Runnable macAutomationWatchdog = () -> {
@@ -692,7 +694,8 @@ public class RouterBackgroundService extends Service {
     }
 
     private boolean isMacTaskActive() {
-        return isMacEnabled() || isMacStopping() || hasModifiedMacPolicies(loadMacAutomationState());
+        return MacScheduleLogic.shouldKeepAutomationTaskActive(
+                isMacEnabled(), isMacStopping(), hasModifiedMacPolicies(loadMacAutomationState()));
     }
 
     private boolean hasAnyEnabledTask() {
@@ -867,18 +870,19 @@ public class RouterBackgroundService extends Service {
 
     private void runMacAutomationCycle() {
         if (!monitoring || !isMacTaskActive() || macAutomationBusy) return;
+        macAutomationCycleStartedAt = SystemClock.elapsedRealtime();
         macAutomationStopping = isMacStopping();
         if (macAutomationStopping && !hasModifiedMacPolicies(loadMacAutomationState())) {
             finishMacAutomationStop();
             return;
         }
         if (!routerReachable || wifiNetwork == null) {
-            updateMacStatus("أتمتة MAC محفوظة وتنتظر اتصال Wi-Fi والراوتر. لن أفقد أوقات السياسات الأصلية أثناء الانقطاع.");
+            updateMacStatus("أتمتة MAC مفعّلة ومحفوظة؛ أنتظر اتصال Wi-Fi والراوتر. سيستمر فحص السياسات عند عودة الاتصال.");
             scheduleMacAutomation(RETRY_DELAY_MS);
             return;
         }
         if (macAutomationAuthRequired) {
-            updateMacStatus("بانتظار تسجيل الدخول إلى الراوتر من واجهة التطبيق. سأستأنف التصفير والاستعادة بعد المصادقة.");
+            updateMacStatus("أتمتة MAC مفعّلة؛ بانتظار تسجيل الدخول إلى الراوتر. سأستأنف فحص السياسات بعد المصادقة.");
             scheduleMacAutomation(RETRY_DELAY_MS);
             return;
         }
@@ -900,114 +904,196 @@ public class RouterBackgroundService extends Service {
                 restorePendingMacChangesNow();
                 return;
             }
-            JSONObject state = loadMacAutomationState();
-            boolean forceRecapture = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                    .getBoolean(PREF_MAC_AUTO_RECAPTURE, false);
-            if (state == null || !routerHost.equals(state.optString("routerHost", ""))
-                    || state.optJSONArray("policies") == null
-                    || (forceRecapture && !hasModifiedMacPolicies(state))) {
-                captureMacPolicies();
-            } else {
-                if (forceRecapture) getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
-                        .putBoolean(PREF_MAC_AUTO_RECAPTURE, false).apply();
-                readRouterClock((clock, error) -> {
-                    if (error != null || clock == null) {
-                        macAutomationBusy = false;
-                        updateMacStatus("تعذرت قراءة ساعة الراوتر؛ لم أنفذ أي تغيير. " + (error == null ? "" : error));
-                        scheduleMacAutomation(RETRY_DELAY_MS);
-                    } else {
-                        processMacAutomationClock(clock);
-                    }
-                });
-            }
+            // Refresh every router policy slot on every automation cycle. The saved
+            // original values of policies already changed by this app are merged
+            // back in, so a fresh router read can never replace their restore data.
+            refreshMacPoliciesAndProcess();
         });
     }
 
-    private void captureMacPolicies() {
-        readAllMacPolicies((policies, error) -> {
-            if (error != null || policies == null) {
+    private void scheduleNextMacAutomationCycle() {
+        long elapsed = SystemClock.elapsedRealtime() - macAutomationCycleStartedAt;
+        long delay = Math.max(500L, MAC_AUTO_INTERVAL_MS - Math.max(0L, elapsed));
+        scheduleMacAutomation(delay);
+    }
+
+    private void refreshMacPoliciesAndProcess() {
+        readAllMacPolicies((currentPolicies, error) -> {
+            if (error != null || currentPolicies == null) {
                 macAutomationBusy = false;
                 mainHandler.removeCallbacks(macAutomationWatchdog);
-                updateMacStatus("تعذرت قراءة السياسات كاملة؛ لم أغيّر أي إعداد. " + (error == null ? "" : error));
+                updateMacStatus("تعذرت إعادة قراءة خانات سياسات MAC؛ لم أغيّر أي إعداد، وستبقى الأتمتة مفعّلة وتعيد المحاولة. "
+                        + (error == null ? "" : error));
                 scheduleMacAutomation(RETRY_DELAY_MS);
                 return;
             }
-            JSONArray eligible = new JSONArray();
-            List<JSONObject> candidates = new ArrayList<>();
-            List<MacScheduleLogic.PolicySlot> candidateSlots = new ArrayList<>();
-            for (JSONObject policy : policies) {
-                String mode = policy.optString("filterMode", "");
-                String mac = policy.optString("mac", "");
-                if (!"pass".equalsIgnoreCase(mode) || !policy.optBoolean("enabled", false)
-                        || !isValidMacValue(mac)) continue;
-                int sh = policy.optInt("startHour", -1);
-                int sm = policy.optInt("startMinute", -1);
-                int eh = policy.optInt("endHour", -1);
-                int em = policy.optInt("endMinute", -1);
-                int sd = policy.optInt("startDay", -1);
-                int ed = policy.optInt("endDay", -1);
-                if (sh < 0 || sh > 23 || sm < 0 || sm > 59 || (sh == 0 && sm == 0)
-                        || eh < 0 || eh > 23 || em < 0 || em > 59
-                        || sd < 0 || sd > 6 || ed < 0 || ed > 6) continue;
-                try {
-                    policy.put("slotKey", routerHost + "#" + policy.optInt("number", -1));
-                    policy.put("modified", false);
-                    policy.put("modifiedDate", "");
-                    policy.put("pending", false);
-                    policy.put("conflict", false);
-                    candidates.add(policy);
-                    candidateSlots.add(new MacScheduleLogic.PolicySlot(policy.optInt("number", -1), sh * 60 + sm));
-                } catch (JSONException ignored) { }
+
+            JSONObject previousState = loadMacAutomationState();
+            boolean previousHasPendingChanges = hasModifiedMacPolicies(previousState);
+            String previousHost = previousState == null ? "" : previousState.optString("routerHost", "");
+            if (previousState != null && !routerHost.equals(previousHost) && previousHasPendingChanges) {
+                macAutomationBusy = false;
+                mainHandler.removeCallbacks(macAutomationWatchdog);
+                updateMacStatus("توجد سياسات معدّلة محفوظة للراوتر "
+                        + (previousHost.isEmpty() ? "سابق غير محدد" : previousHost)
+                        + ". لن أكتب على راوتر مختلف؛ أعد الاتصال بالراوتر الأصلي لاستكمال الاستعادة بأمان.");
+                scheduleMacAutomation(RETRY_DELAY_MS);
+                return;
             }
-            // Count by policy slot number, never by time. Different slots at the same time remain separate.
-            List<MacScheduleLogic.PolicySlot> uniqueSlots = MacScheduleLogic.uniquePolicySlots(candidateSlots);
-            for (MacScheduleLogic.PolicySlot slot : uniqueSlots) {
-                for (JSONObject candidate : candidates) {
-                    if (candidate.optInt("number", -1) == slot.number) {
-                        eligible.put(candidate);
-                        break;
+
+            boolean forceRecapture = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                    .getBoolean(PREF_MAC_AUTO_RECAPTURE, false) && !previousHasPendingChanges;
+            if (previousState == null || !routerHost.equals(previousHost)) {
+                previousState = null;
+                forceRecapture = true;
+            }
+
+            JSONObject refreshedState = mergeCurrentMacPolicies(currentPolicies, previousState, forceRecapture);
+            if (refreshedState == null) {
+                macAutomationBusy = false;
+                mainHandler.removeCallbacks(macAutomationWatchdog);
+                updateMacStatus("تعذر تجهيز حالة السياسات المقروءة. لم أنفذ أي تعديل، وستبقى الأتمتة مفعّلة لإعادة المحاولة.");
+                scheduleMacAutomation(RETRY_DELAY_MS);
+                return;
+            }
+            saveMacAutomationState(refreshedState);
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                    .putBoolean(PREF_MAC_AUTO_RECAPTURE, false).apply();
+
+            int totalSlots = refreshedState.optInt("totalPolicySlots", currentPolicies.size());
+            int eligibleCount = refreshedState.optInt("eligiblePolicyCount", 0);
+            int pendingRestoreCount = modifiedPolicies(refreshedState).size();
+            int conflicts = countMacConflicts(refreshedState);
+            if (eligibleCount == 0) {
+                updateMacStatus("التصفير التلقائي مفعّل ويعمل في الخلفية | تم فحص " + totalSlots
+                        + " خانات سياسة | لا توجد سياسة جديدة مؤهلة حالياً | سياسات بانتظار الاستعادة "
+                        + pendingRestoreCount + " | تعارضات تحتاج مراجعة " + conflicts
+                        + " | سأعيد فحص الخانات تلقائياً كل 15 ثانية دون إيقاف الأتمتة.");
+            } else {
+                updateMacStatus("التصفير التلقائي مفعّل | تم فحص " + totalSlots + " خانات سياسة | السياسات المؤهلة حالياً "
+                        + eligibleCount + " | سياسات بانتظار الاستعادة " + pendingRestoreCount
+                        + " | تعارضات " + conflicts + " | إعادة الفحص كل 15 ثانية.");
+            }
+
+            readRouterClock((clock, clockError) -> {
+                if (clockError != null || clock == null) {
+                    macAutomationBusy = false;
+                    mainHandler.removeCallbacks(macAutomationWatchdog);
+                    updateMacStatus("تم فحص " + totalSlots + " خانات سياسة، لكن تعذرت قراءة ساعة الراوتر؛ لم أغيّر أي سياسة. "
+                            + (clockError == null ? "" : clockError));
+                    scheduleMacAutomation(RETRY_DELAY_MS);
+                } else {
+                    processMacAutomationClock(clock);
+                }
+            });
+        });
+    }
+
+    /**
+     * Builds the latest router snapshot while preserving the original start time
+     * and operation flags for every policy that this app has already modified
+     * or is still verifying. Policy identity is always the numbered router slot.
+     */
+    private JSONObject mergeCurrentMacPolicies(List<JSONObject> currentPolicies,
+                                               JSONObject previousState,
+                                               boolean forceRecapture) {
+        try {
+            JSONArray previousPolicies = previousState == null ? null : previousState.optJSONArray("policies");
+            JSONArray merged = new JSONArray();
+            boolean[] included = new boolean[11];
+            int currentEligibleCount = 0;
+
+            for (JSONObject current : currentPolicies) {
+                if (current == null) continue;
+                int number = current.optInt("number", -1);
+                if (number < 1 || number > 10 || included[number]) continue;
+
+                JSONObject previous = findMacPolicyByNumber(previousPolicies, number);
+                boolean currentEligible = isEligibleMacPolicy(current);
+                if (currentEligible && (forceRecapture || previous == null || !previous.optBoolean("conflict", false))) {
+                    currentEligibleCount++;
+                }
+                if (!forceRecapture && previous != null && isMacPolicyStateProtected(previous)) {
+                    // Preserve the exact original snapshot while a reset/restore is pending,
+                    // completed, or marked as a manual-change conflict.
+                    merged.put(new JSONObject(previous.toString()));
+                    included[number] = true;
+                    continue;
+                }
+
+                if (currentEligible) {
+                    JSONObject fresh = new JSONObject(current.toString());
+                    fresh.put("slotKey", routerHost + "#" + number);
+                    fresh.put("modified", false);
+                    fresh.put("modifiedDate", "");
+                    fresh.put("pending", false);
+                    fresh.put("conflict", false);
+                    fresh.remove("conflictReason");
+                    merged.put(fresh);
+                    included[number] = true;
+                }
+            }
+
+            // Keep modified/pending/conflicted records even if the router's selector
+            // temporarily omits their slot; losing them would lose restoration data.
+            if (!forceRecapture && previousPolicies != null) {
+                for (int i = 0; i < previousPolicies.length(); i++) {
+                    JSONObject previous = previousPolicies.optJSONObject(i);
+                    if (previous == null) continue;
+                    int number = previous.optInt("number", -1);
+                    if (number < 1 || number > 10 || included[number]) continue;
+                    if (isMacPolicyStateProtected(previous)) {
+                        merged.put(new JSONObject(previous.toString()));
+                        included[number] = true;
                     }
                 }
             }
-            if (eligible.length() == 0) {
-                macAutomationBusy = false;
-                mainHandler.removeCallbacks(macAutomationWatchdog);
-                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
-                        .putBoolean(PREF_MAC_AUTO_ENABLED, false)
-                        .putBoolean(PREF_MAC_AUTO_RECAPTURE, false).apply();
-                updateMacStatus("قرأت " + policies.size() + " خانات سياسة، لكن لا توجد سياسة Permit Only مفعّلة ذات MAC صحيح ووقت بداية غير 00:00.");
-                stopServiceIfIdle();
-                return;
-            }
+
             JSONObject state = new JSONObject();
-            try {
-                state.put("schema", 2);
-                state.put("routerHost", routerHost);
-                state.put("capturedAt", System.currentTimeMillis());
-                state.put("totalPolicySlots", policies.size());
-                state.put("eligiblePolicyCount", eligible.length());
-                state.put("policies", eligible);
-            } catch (JSONException ignored) { }
-            saveMacAutomationState(state);
-            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putBoolean(PREF_MAC_AUTO_RECAPTURE, false).apply();
-            macAutomationBusy = false;
-            mainHandler.removeCallbacks(macAutomationWatchdog);
-            macAutomationZeroedCount = 0;
-            macAutomationRestoredCount = 0;
-            StringBuilder slotsSummary = new StringBuilder();
-            for (int i = 0; i < eligible.length(); i++) {
-                JSONObject item = eligible.optJSONObject(i);
-                if (item == null) continue;
-                if (slotsSummary.length() > 0) slotsSummary.append("، ");
-                slotsSummary.append(item.optInt("number", -1)).append(" (")
-                        .append(two(item.optInt("startHour", 0))).append(":")
-                        .append(two(item.optInt("startMinute", 0))).append(")");
-            }
-            updateMacStatus("تمت قراءة " + policies.size() + " خانات وحفظ " + eligible.length()
-                    + " سياسة مؤهلة مستقلة. الأرقام والأوقات: " + slotsSummary
-                    + ". كل رقم سياسة يُعالج منفرداً؛ السياسات ذات الوقت المتطابق لا تُدمج.");
-            scheduleMacAutomation(500L);
-        });
+            state.put("schema", 3);
+            state.put("routerHost", routerHost);
+            state.put("capturedAt", previousState == null || forceRecapture
+                    ? System.currentTimeMillis() : previousState.optLong("capturedAt", System.currentTimeMillis()));
+            state.put("lastScanAt", System.currentTimeMillis());
+            state.put("totalPolicySlots", currentPolicies.size());
+            state.put("eligiblePolicyCount", currentEligibleCount);
+            state.put("trackedPolicyCount", merged.length());
+            state.put("policies", merged);
+            return state;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private JSONObject findMacPolicyByNumber(JSONArray policies, int number) {
+        if (policies == null) return null;
+        for (int i = 0; i < policies.length(); i++) {
+            JSONObject policy = policies.optJSONObject(i);
+            if (policy != null && policy.optInt("number", -1) == number) return policy;
+        }
+        return null;
+    }
+
+    private boolean isMacPolicyStateProtected(JSONObject policy) {
+        return policy.optBoolean("modified", false)
+                || policy.optBoolean("pending", false)
+                || policy.optBoolean("conflict", false);
+    }
+
+    private boolean isEligibleMacPolicy(JSONObject policy) {
+        if (policy == null || policy.optInt("number", -1) < 1 || policy.optInt("number", -1) > 10) return false;
+        if (!"pass".equalsIgnoreCase(policy.optString("filterMode", ""))
+                || !policy.optBoolean("enabled", false)
+                || !isValidMacValue(policy.optString("mac", ""))) return false;
+        int sh = policy.optInt("startHour", -1);
+        int sm = policy.optInt("startMinute", -1);
+        int eh = policy.optInt("endHour", -1);
+        int em = policy.optInt("endMinute", -1);
+        int sd = policy.optInt("startDay", -1);
+        int ed = policy.optInt("endDay", -1);
+        return sh >= 0 && sh <= 23 && sm >= 0 && sm <= 59 && !(sh == 0 && sm == 0)
+                && eh >= 0 && eh <= 23 && em >= 0 && em <= 59
+                && sd >= 0 && sd <= 6 && ed >= 0 && ed <= 6;
     }
 
     private void processMacAutomationClock(JSONObject clock) {
@@ -1030,8 +1116,8 @@ public class RouterBackgroundService extends Service {
         if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || day < 0 || day > 6 || date.isEmpty()) {
             macAutomationBusy = false;
             mainHandler.removeCallbacks(macAutomationWatchdog);
-            updateMacStatus("ساعة الراوتر غير مكتملة أو غير صالحة؛ لم أغيّر أي سياسة.");
-            scheduleMacAutomation(MAC_AUTO_INTERVAL_MS);
+            updateMacStatus("ساعة الراوتر غير مكتملة أو غير صالحة؛ لم أغيّر أي سياسة، وستبقى الأتمتة مفعّلة.");
+            scheduleNextMacAutomationCycle();
             return;
         }
         JSONArray policies = state.optJSONArray("policies");
@@ -1068,11 +1154,17 @@ public class RouterBackgroundService extends Service {
         if (operations.isEmpty()) {
             macAutomationBusy = false;
             mainHandler.removeCallbacks(macAutomationWatchdog);
-            updateMacStatus("مراقبة MAC الخلفية نشطة | ساعة الراوتر " + two(hour) + ":" + two(minute)
-                    + " | السياسات المستقلة " + (policies == null ? 0 : policies.length())
+            int totalSlots = state.optInt("totalPolicySlots", policies == null ? 0 : policies.length());
+            int eligibleCount = state.optInt("eligiblePolicyCount", 0);
+            int pendingRestoreCount = modifiedPolicies(state).size();
+            int conflicts = countMacConflicts(state);
+            updateMacStatus("التصفير التلقائي مفعّل في الخلفية | ساعة الراوتر " + two(hour) + ":" + two(minute)
+                    + " | خانات تم فحصها " + totalSlots + " | سياسات مؤهلة حالياً " + eligibleCount
+                    + " | بانتظار الاستعادة " + pendingRestoreCount + " | تعارضات " + conflicts
                     + " | تصفير ناجح " + macAutomationZeroedCount
-                    + " | استعادة ناجحة " + macAutomationRestoredCount + " | الاستعادة اليومية 23:55.");
-            scheduleMacAutomation(MAC_AUTO_INTERVAL_MS);
+                    + " | استعادة ناجحة " + macAutomationRestoredCount
+                    + " | الاستعادة اليومية 23:55 | الفحص الدوري كل 15 ثانية.");
+            scheduleNextMacAutomationCycle();
             return;
         }
         processMacPolicyOperations(operations, 0, restoreMode, date, () -> {
@@ -1084,12 +1176,17 @@ public class RouterBackgroundService extends Service {
                 return;
             }
             JSONObject latest = loadMacAutomationState();
-            updateMacStatus((restoreMode ? "مرحلة استعادة" : "مرحلة تصفير") + " | ساعة الراوتر "
-                    + two(hour) + ":" + two(minute) + " | تصفير " + macAutomationZeroedCount
-                    + " | استعادة " + macAutomationRestoredCount
-                    + " | السياسات المحتسبة بالرقم لا بالوقت: "
-                    + (latest == null || latest.optJSONArray("policies") == null ? 0 : latest.optJSONArray("policies").length()));
-            scheduleMacAutomation(2500L);
+            int totalSlots = latest == null ? 0 : latest.optInt("totalPolicySlots", 0);
+            int eligibleCount = latest == null ? 0 : latest.optInt("eligiblePolicyCount", 0);
+            int pendingRestoreCount = latest == null ? 0 : modifiedPolicies(latest).size();
+            int conflicts = countMacConflicts(latest);
+            updateMacStatus((restoreMode ? "مرحلة الاستعادة" : "مرحلة التصفير")
+                    + " | التصفير التلقائي مفعّل | ساعة الراوتر " + two(hour) + ":" + two(minute)
+                    + " | خانات مفحوصة " + totalSlots + " | سياسات مؤهلة حالياً " + eligibleCount
+                    + " | بانتظار الاستعادة " + pendingRestoreCount + " | تعارضات " + conflicts
+                    + " | تصفير " + macAutomationZeroedCount + " | استعادة " + macAutomationRestoredCount
+                    + " | الاستعادة اليومية 23:55.");
+            scheduleNextMacAutomationCycle();
         });
     }
 

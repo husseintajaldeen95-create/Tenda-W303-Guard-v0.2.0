@@ -81,6 +81,16 @@ public final class MacScheduleLogic {
         return modified && (isRestoreTime(nowHour, nowMinute) || modifiedOnAnotherDate);
     }
 
+    /**
+     * The background task remains active while the user has enabled automation,
+     * even when the latest scan finds zero eligible policies. The eligible count
+     * is deliberately not part of this lifecycle decision.
+     */
+    public static boolean shouldKeepAutomationTaskActive(boolean enabled, boolean stopping,
+                                                          boolean hasPendingRestore) {
+        return enabled || stopping || hasPendingRestore;
+    }
+
     public static int minutes(int hour, int minute) {
         return hour * 60 + minute;
     }
