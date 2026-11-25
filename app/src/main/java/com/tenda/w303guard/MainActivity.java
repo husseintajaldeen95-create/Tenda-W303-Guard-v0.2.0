@@ -65,30 +65,11 @@ public class MainActivity extends Activity {
         void onComplete(boolean found);
     }
 
-    private interface JsonResultCallback {
-        void onResult(JSONObject value, String error);
-    }
-
-    private interface PolicyListCallback {
-        void onResult(List<JSONObject> policies, String error);
-    }
-
-    private interface PolicyOperationCallback {
-        void onResult(boolean success, String message);
-    }
-
-    private interface ClockCallback {
-        void onResult(JSONObject clock, String error);
-    }
-
     private static final String DEFAULT_ROUTER = "192.168.0.1";
     private static final int ORANGE = Color.rgb(232, 117, 0);
     private static final int DARK = Color.rgb(31, 41, 55);
     private static final int MUTED = Color.rgb(90, 99, 110);
     private static final int BORDER = Color.rgb(224, 228, 233);
-    private static final String PREF_MAC_AUTO_ENABLED = "mac_auto_enabled";
-    private static final String PREF_MAC_AUTO_STATE = "mac_auto_state_v1";
-    private static final long MAC_AUTO_INTERVAL_MS = 15000L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private ScrollView mainScrollView;
@@ -157,6 +138,10 @@ public class MainActivity extends Activity {
                 String message = intent.getStringExtra(RouterBackgroundService.EXTRA_STATUS);
                 if (liveStatusView != null && message != null) liveStatusView.setText(message);
                 updateLiveControls();
+            } else if (RouterBackgroundService.ACTION_MAC_STATUS.equals(action)) {
+                macAutomationRunning = intent.getBooleanExtra(RouterBackgroundService.EXTRA_MAC_ACTIVE, false);
+                String message = intent.getStringExtra(RouterBackgroundService.EXTRA_MAC_STATUS);
+                updateMacAutomationUi(message == null ? "حالة أتمتة MAC غير متاحة." : message);
             } else if (RouterBackgroundService.ACTION_TRAFFIC.equals(action)) {
                 String json = intent.getStringExtra(RouterBackgroundService.EXTRA_JSON);
                 String source = intent.getStringExtra(RouterBackgroundService.EXTRA_SOURCE_PATH);
@@ -184,19 +169,15 @@ public class MainActivity extends Activity {
     private Button macAutomationStartButton;
     private Button macAutomationStopButton;
     private boolean macAutomationRunning = false;
-    private boolean macAutomationBusy = false;
-    private boolean macAutomationStopping = false;
-    private boolean macRecoveryAttemptedForSession = false;
-    private int macAutomationZeroedCount = 0;
-    private int macAutomationRestoredCount = 0;
-    private final Runnable macAutomationRunnable = this::runMacAutomationCycle;
 
     @Override
     public void onCreate(Bundle state) {
         super.onCreate(state);
         preferences = getSharedPreferences("tenda_w303_guard", MODE_PRIVATE);
         activeHost = preferences.getString("router_ip", DEFAULT_ROUTER);
-        macAutomationRunning = preferences.getBoolean(PREF_MAC_AUTO_ENABLED, false);
+        macAutomationRunning = preferences.getBoolean(RouterBackgroundService.PREF_MAC_AUTO_ENABLED, false)
+                || preferences.getBoolean(RouterBackgroundService.PREF_MAC_AUTO_STOPPING, false)
+                || hasPendingMacRestoreInPreferences();
         liveMonitorRunning = preferences.getBoolean(RouterBackgroundService.PREF_ENABLED, false);
         livePollIntervalMs = normalizeLivePollInterval(preferences.getInt(
                 RouterBackgroundService.PREF_INTERVAL_MS, 3000));
@@ -212,7 +193,7 @@ public class MainActivity extends Activity {
         updateLiveControls();
         restoreLastTrafficSnapshot();
         updateMacAutomationUi(macAutomationRunning
-                ? "الأتمتة محفوظة ومفعّلة؛ اتصل بالراوتر لاستكمال الجدولة."
+                ? "أتمتة MAC محفوظة ومفعّلة في الخدمة الخلفية؛ ستستأنف عند اتصال الراوتر."
                 : "التصفير التلقائي متوقف. اتصل بالراوتر ثم ابدأ التشغيل.");
     }
 
@@ -274,7 +255,7 @@ public class MainActivity extends Activity {
         gap(root, 10);
         LinearLayout macAutomationCard = card(root);
         macAutomationCard.addView(text("التصفير والاستعادة التلقائية لجدولة MAC", 17, true, DARK), matchWrap());
-        macAutomationCard.addView(text("يحفظ التطبيق وقت البداية الأصلي لكل سياسة MAC مفعّلة. عند حلول وقت بداية كل جهاز يصفر البداية إلى 00:00، ثم يستعيد وقتها الأصلي عند 23:00. لا يغيّر MAC أو النهاية أو الأيام أو حالة Enable.", 12, false, MUTED), matchWrap());
+        macAutomationCard.addView(text("يحفظ وقت البداية الأصلي لكل رقم سياسة MAC على حدة. كل سياسة تُحتسب مستقلة حتى إذا تطابق وقتها مع سياسة أخرى. عند حلول وقت بدايتها تُصفّر إلى 00:00، ثم تُستعاد الساعة 23:55. تعمل الأتمتة مع مراقبة المشتركين في خدمة خلفية واحدة وتنتظر عودة الراوتر عند الانقطاع.", 12, false, MUTED), matchWrap());
         macAutomationStatusView = text("التصفير التلقائي متوقف. اتصل بالراوتر ثم ابدأ التشغيل لقراءة السياسات وحفظ أوقاتها الأصلية.", 12, true, MUTED);
         macAutomationStatusView.setPadding(0, dp(7), 0, dp(7));
         macAutomationCard.addView(macAutomationStatusView, matchWrap());
@@ -288,7 +269,7 @@ public class MainActivity extends Activity {
         macAutomationControls.addView(macAutomationStartButton, new LinearLayout.LayoutParams(0, -2, 2));
         macAutomationControls.addView(macAutomationStopButton, new LinearLayout.LayoutParams(0, -2, 1));
         macAutomationCard.addView(macAutomationControls, matchWrap());
-        macAutomationCard.addView(text("مهم: يعتمد التنفيذ على ساعة الراوتر من صفحة Time Settings وليس ساعة الهاتف. يجب إبقاء التطبيق عاملاً ومتّصلاً بشبكة الراوتر؛ إغلاق التطبيق بالقوة أو إيقافه من النظام قد يمنع تنفيذ حدث في موعده.", 11, false, MUTED), matchWrap());
+        macAutomationCard.addView(text("مهم: يعتمد التنفيذ على ساعة الراوتر من Time Settings وليس ساعة الهاتف. لا يلزم إبقاء واجهة التطبيق مفتوحة. إذا انقطع Wi-Fi أو أُعيد تشغيل الراوتر تنتظر الخدمة ثم تستأنف عند عودة الاتصال. لا تستخدم Force stop ولا تمسح بيانات التطبيق أثناء وجود سياسات معدّلة.", 11, false, MUTED), matchWrap());
 
         gap(root, 10);
         LinearLayout trafficCard = card(root);
@@ -543,7 +524,8 @@ public class MainActivity extends Activity {
                 pageView.setText("الصفحة الحالية: " + url);
                 if (!isAllowedRouterUri(Uri.parse(url))) return;
                 status("تم تحميل صفحة الراوتر. إذا ظهرت شاشة الدخول، سجّل الدخول من داخلها.");
-                if (liveMonitorRunning) {
+                if (liveMonitorRunning || preferences.getBoolean(RouterBackgroundService.PREF_MAC_AUTO_ENABLED, false)
+                        || preferences.getBoolean(RouterBackgroundService.PREF_MAC_AUTO_STOPPING, false)) {
                     Intent retryBackgroundAuth = new Intent(MainActivity.this, RouterBackgroundService.class)
                             .setAction(RouterBackgroundService.ACTION_RETRY_AUTH);
                     startService(retryBackgroundAuth);
@@ -555,13 +537,6 @@ public class MainActivity extends Activity {
                     if (webView != null && webView.getUrl() != null) {
                         inspectCurrentPage();
                         readTrafficStatisticsFromPage(false);
-                        if (macAutomationRunning) {
-                            handler.removeCallbacks(macAutomationRunnable);
-                            handler.post(macAutomationRunnable);
-                        } else if (hasPendingMacRestoration() && !macRecoveryAttemptedForSession) {
-                            macRecoveryAttemptedForSession = true;
-                            restoreOrphanedMacChanges();
-                        }
                     }
                 }, 850);
             }
@@ -588,8 +563,13 @@ public class MainActivity extends Activity {
             toast("أدخل عنوان IPv4 محلياً صحيحاً، مثل 192.168.0.1");
             return;
         }
+        if (!ip.equals(activeHost) && (preferences.getBoolean(RouterBackgroundService.PREF_MAC_AUTO_ENABLED, false)
+                || preferences.getBoolean(RouterBackgroundService.PREF_MAC_AUTO_STOPPING, false))) {
+            toast("أوقف أتمتة MAC واستعد السياسات أولاً قبل تغيير عنوان الراوتر.");
+            return;
+        }
         if (liveMonitorRunning && !ip.equals(activeHost)) {
-            stopLiveMonitoring("أوقفت المراقبة لأن عنوان الراوتر تغيّر.");
+            stopLiveMonitoring("أوقفت مراقبة حركة البيانات لأن عنوان الراوتر تغيّر.");
         }
         activeHost = ip;
         preferences.edit().putString("router_ip", ip).apply();
@@ -692,6 +672,10 @@ public class MainActivity extends Activity {
                     return;
                 }
                 status("تم إرسال بيانات الدخول إلى الراوتر للتحقق منها...");
+                try {
+                    WebViewDatabase.getInstance(MainActivity.this)
+                            .setHttpAuthUsernamePassword(host, realm, username, password);
+                } catch (Exception ignored) { }
                 authHandler.proceed(username, password);
                 dialog.dismiss();
             }));
@@ -1246,7 +1230,9 @@ public class MainActivity extends Activity {
         liveCycleBusy = false;
         preferences.edit().putBoolean(RouterBackgroundService.PREF_ENABLED, false).apply();
         handler.removeCallbacks(liveMonitorRunnable);
-        stopService(new Intent(this, RouterBackgroundService.class));
+        Intent stopTraffic = new Intent(this, RouterBackgroundService.class)
+                .setAction(RouterBackgroundService.ACTION_STOP);
+        try { startService(stopTraffic); } catch (Exception ignored) { }
         updateLiveControls();
         if (liveStatusView != null) liveStatusView.setText(reason + " آخر قراءة ناجحة: " +
                 (trafficSnapshotAt > 0 ? formatTime(trafficSnapshotAt) : "غير متاحة"));
@@ -1289,10 +1275,41 @@ public class MainActivity extends Activity {
         }
     }
 
+    private boolean hasPendingMacRestoreInPreferences() {
+        if (preferences == null) return false;
+        String raw = preferences.getString(RouterBackgroundService.PREF_MAC_AUTO_STATE, "");
+        if (raw == null || raw.trim().isEmpty()) return false;
+        try {
+            JSONObject state = new JSONObject(raw);
+            JSONArray policies = state.optJSONArray("policies");
+            if (policies == null) return false;
+            for (int i = 0; i < policies.length(); i++) {
+                JSONObject policy = policies.optJSONObject(i);
+                if (policy != null && !policy.optBoolean("conflict", false)
+                        && (policy.optBoolean("modified", false) || policy.optBoolean("pending", false))) return true;
+            }
+        } catch (Exception ignored) { }
+        return false;
+    }
+
     private void ensureBackgroundMonitorStarted() {
-        if (preferences == null || !preferences.getBoolean(RouterBackgroundService.PREF_ENABLED, false)) return;
-        liveMonitorRunning = true;
+        if (preferences == null) return;
+        boolean trafficEnabled = preferences.getBoolean(RouterBackgroundService.PREF_ENABLED, false);
+        boolean macAutoEnabled = preferences.getBoolean(RouterBackgroundService.PREF_MAC_AUTO_ENABLED, false);
+        boolean pendingRestore = hasPendingMacRestoreInPreferences();
+        if (pendingRestore && !macAutoEnabled) {
+            preferences.edit().putBoolean(RouterBackgroundService.PREF_MAC_AUTO_STOPPING, true).apply();
+        }
+        boolean macEnabled = macAutoEnabled
+                || preferences.getBoolean(RouterBackgroundService.PREF_MAC_AUTO_STOPPING, false)
+                || pendingRestore;
+        if (!trafficEnabled && !macEnabled) return;
+        liveMonitorRunning = trafficEnabled;
+        macAutomationRunning = macEnabled;
         updateLiveControls();
+        updateMacAutomationUi(macEnabled
+                ? "أتمتة MAC محفوظة؛ يجري استئنافها من خدمة الخلفية."
+                : "التصفير التلقائي متوقف.");
         Intent service = new Intent(this, RouterBackgroundService.class)
                 .setAction(RouterBackgroundService.ACTION_START)
                 .putExtra(RouterBackgroundService.EXTRA_ROUTER_HOST, activeHost)
@@ -1301,7 +1318,7 @@ public class MainActivity extends Activity {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(service);
             else startService(service);
         } catch (Exception e) {
-            if (liveStatusView != null) liveStatusView.setText("المراقبة محفوظة، لكن تعذر إعادة تشغيل خدمة الخلفية. افتح التطبيق وابدأها مجدداً.");
+            if (liveStatusView != null) liveStatusView.setText("المهام محفوظة، لكن تعذر إعادة تشغيل خدمة الخلفية. افتح التطبيق مجدداً.");
         }
     }
 
@@ -1458,634 +1475,69 @@ public class MainActivity extends Activity {
             toast("اتصل بالراوتر وسجّل الدخول أولاً.");
             return;
         }
-        if (macAutomationBusy) {
-            toast("يجري حالياً فحص أو تحديث لسياسات MAC. انتظر اكتماله.");
+        if (macAutomationRunning || preferences.getBoolean(RouterBackgroundService.PREF_MAC_AUTO_ENABLED, false)) {
+            toast("أتمتة MAC تعمل بالفعل في الخلفية.");
             return;
         }
-        JSONObject saved = loadMacAutomationState();
-        if (saved != null && activeHost.equals(saved.optString("routerHost", "")) && hasModifiedMacPolicies(saved)) {
-            macAutomationRunning = true;
-            macAutomationStopping = false;
-            preferences.edit().putBoolean(PREF_MAC_AUTO_ENABLED, true).apply();
-            updateMacAutomationUi("استُعيدت النسخة المحفوظة من أوقات البداية الأصلية. جارٍ متابعة الجدولة.");
-            handler.removeCallbacks(macAutomationRunnable);
-            handler.post(macAutomationRunnable);
+        String requestedHost = routerIp == null ? activeHost : routerIp.getText().toString().trim();
+        if (!isPrivateIpv4(requestedHost)) {
+            toast("عنوان الراوتر المحلي غير صالح.");
             return;
         }
-
-        macAutomationBusy = true;
-        updateMacAutomationUi("جارٍ فتح صفحة MAC المخفية وقراءة السياسات العشر دون تغييرها...");
-        ensureMacAutomationFrames(0, () -> {
-            if (macAutomationStopping) {
-                macAutomationBusy = false;
-                macAutomationStopping = false;
-                updateMacAutomationUi("تم إلغاء بدء التصفير قبل حفظ أي سياسة.");
-                return;
-            }
-            readAllMacPolicies((policies, error) -> {
-            if (macAutomationStopping) {
-                macAutomationBusy = false;
-                macAutomationStopping = false;
-                updateMacAutomationUi("تم إلغاء بدء التصفير قبل حفظ أي سياسة.");
-                return;
-            }
-            if (error != null) {
-                macAutomationBusy = false;
-                updateMacAutomationUi("تعذر قراءة السياسات: " + error + " لم يُغيّر التطبيق أي إعداد.");
-                return;
-            }
-            JSONArray eligible = new JSONArray();
-            boolean permitMode = false;
-            for (JSONObject policy : policies) {
-                String mode = policy.optString("filterMode", "");
-                if ("pass".equalsIgnoreCase(mode)) permitMode = true;
-                String mac = policy.optString("mac", "");
-                if (!"pass".equalsIgnoreCase(mode) || !policy.optBoolean("enabled", false)
-                        || !isValidMacValue(mac)) continue;
-                int sh = policy.optInt("startHour", -1);
-                int sm = policy.optInt("startMinute", -1);
-                if (sh < 0 || sh > 23 || sm < 0 || sm > 59 || (sh == 0 && sm == 0)) continue;
-                try {
-                    policy.put("modified", false);
-                    policy.put("modifiedDate", "");
-                    policy.put("pending", false);
-                    eligible.put(policy);
-                } catch (JSONException ignored) { }
-            }
-            if (!permitMode) {
-                macAutomationBusy = false;
-                updateMacAutomationUi("وضع Filter Mode ليس Permit Only. لم أغيّر وضع التصفية ولم أرسل أي حفظ.");
-                return;
-            }
-            if (eligible.length() == 0) {
-                macAutomationBusy = false;
-                updateMacAutomationUi("لم أجد سياسة مفعّلة ذات MAC صحيح ووقت بداية غير صفري. لم يتم تعديل الراوتر.");
-                return;
-            }
-            JSONObject state = new JSONObject();
-            try {
-                state.put("schema", 1);
-                state.put("routerHost", activeHost);
-                state.put("capturedAt", System.currentTimeMillis());
-                state.put("policies", eligible);
-            } catch (JSONException ignored) { }
-            saveMacAutomationState(state);
-            macAutomationBusy = false;
+        activeHost = requestedHost;
+        preferences.edit()
+                .putString("router_ip", activeHost)
+                .putBoolean(RouterBackgroundService.PREF_ENABLED, true)
+                .putBoolean(RouterBackgroundService.PREF_MAC_AUTO_ENABLED, true)
+                .putBoolean(RouterBackgroundService.PREF_MAC_AUTO_STOPPING, false)
+                .putInt(RouterBackgroundService.PREF_INTERVAL_MS, livePollIntervalMs)
+                .apply();
+        Intent service = new Intent(this, RouterBackgroundService.class)
+                .setAction(RouterBackgroundService.ACTION_MAC_START)
+                .putExtra(RouterBackgroundService.EXTRA_ROUTER_HOST, activeHost)
+                .putExtra(RouterBackgroundService.EXTRA_INTERVAL_MS, livePollIntervalMs);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(service);
+            else startService(service);
             macAutomationRunning = true;
-            macAutomationStopping = false;
-            macAutomationZeroedCount = 0;
-            macAutomationRestoredCount = 0;
-            preferences.edit().putBoolean(PREF_MAC_AUTO_ENABLED, true).apply();
-            updateMacAutomationUi("تم حفظ " + eligible.length() + " سياسة مفعّلة. يبدأ التصفير عند وقت بداية كل جهاز، والاستعادة عند 23:00.");
-            handler.removeCallbacks(macAutomationRunnable);
-            handler.post(macAutomationRunnable);
-        });
-        });
+            liveMonitorRunning = true;
+            updateMacAutomationUi("تم طلب تشغيل أتمتة MAC ومراقبة المشتركين في خدمة خلفية واحدة. جارٍ قراءة السياسات.");
+            updateLiveControls();
+            toast("بدأت خدمة التصفير والاستعادة ومراقبة المشتركين.");
+        } catch (Exception e) {
+            macAutomationRunning = false;
+            preferences.edit().putBoolean(RouterBackgroundService.PREF_MAC_AUTO_ENABLED, false)
+                    .putBoolean(RouterBackgroundService.PREF_ENABLED, false).apply();
+            updateMacAutomationUi("تعذر تشغيل الخدمة الخلفية: " + (e.getMessage() == null ? "خطأ غير معروف" : e.getMessage()));
+        }
     }
 
     private void stopMacAutomation() {
-        macAutomationRunning = false;
-        macAutomationStopping = true;
-        preferences.edit().putBoolean(PREF_MAC_AUTO_ENABLED, false).apply();
-        handler.removeCallbacks(macAutomationRunnable);
-        if (macAutomationBusy) {
-            updateMacAutomationUi("إيقاف بعد انتهاء عملية الراوتر الجارية؛ لن أبدأ سياسة جديدة.");
+        if (!preferences.getBoolean(RouterBackgroundService.PREF_MAC_AUTO_ENABLED, false)
+                && !preferences.getBoolean(RouterBackgroundService.PREF_MAC_AUTO_STOPPING, false)) {
+            toast("أتمتة MAC متوقفة بالفعل.");
             return;
         }
-        JSONObject state = loadMacAutomationState();
-        if (state == null || !hasModifiedMacPolicies(state)) {
-            macAutomationStopping = false;
-            updateMacAutomationUi("تم إيقاف التصفير التلقائي. لا توجد أوقات مؤقتة تحتاج إلى استعادة.");
-            return;
-        }
-        macAutomationBusy = true;
-        updateMacAutomationUi("جارٍ استعادة أوقات البداية الأصلية قبل الإيقاف...");
-        ensureMacAutomationFrames(0, this::restorePendingMacChangesNow);
-    }
-
-    private void restoreOrphanedMacChanges() {
-        if (macAutomationBusy || !hasPendingMacRestoration()) return;
-        macAutomationBusy = true;
-        updateMacAutomationUi("استعادة أمان: توجد سياسة بقي وقت بدايتها مؤقتاً من جلسة سابقة.");
-        ensureMacAutomationFrames(0, this::restorePendingMacChangesNow);
-    }
-
-    private void restorePendingMacChangesNow() {
-        restorePendingMacChangesNow(0);
-    }
-
-    private void restorePendingMacChangesNow(int pass) {
-        JSONObject state = loadMacAutomationState();
-        List<JSONObject> restore = modifiedPolicies(state);
-        if (restore.isEmpty()) {
-            macAutomationBusy = false;
-            macAutomationStopping = false;
-            updateMacAutomationUi("لا توجد أوقات مؤقتة تحتاج إلى استعادة.");
-            return;
-        }
-        processMacPolicyOperations(restore, 0, true, routerDateFromStateOrToday(), () -> {
-            if (hasModifiedMacPolicies(loadMacAutomationState()) && pass < 2) {
-                handler.postDelayed(() -> restorePendingMacChangesNow(pass + 1), 700L);
-                return;
-            }
-            macAutomationBusy = false;
-            macAutomationStopping = false;
-            updateMacAutomationUi(hasModifiedMacPolicies(loadMacAutomationState())
-                    ? "بقيت سياسة لم تُستعد بسبب اختلافها عن النسخة المحفوظة. لم أستبدل التعديل اليدوي."
-                    : "تمت استعادة أوقات البداية الأصلية.");
-        });
-    }
-
-    private void runMacAutomationCycle() {
-        if (!macAutomationRunning || macAutomationBusy) return;
-        if (webView == null || webView.getUrl() == null) {
-            scheduleNextMacAutomationTick(5000L);
-            return;
-        }
-        macAutomationBusy = true;
-        ensureMacAutomationFrames(0, () -> readRouterClock((clock, error) -> {
-            if (error != null || clock == null) {
-                if (macAutomationStopping) {
-                    restorePendingMacChangesNow();
-                    return;
-                }
-                macAutomationBusy = false;
-                updateMacAutomationUi("التشغيل مفعّل، لكن تعذرت قراءة ساعة الراوتر من Time Settings؛ لم أنفذ أي تغيير. " + (error == null ? "" : error));
-                scheduleNextMacAutomationTick(MAC_AUTO_INTERVAL_MS);
-                return;
-            }
-            processMacAutomationClock(clock);
-        }));
-    }
-
-    private void processMacAutomationClock(JSONObject clock) {
-        if (macAutomationStopping) {
-            restorePendingMacChangesNow();
-            return;
-        }
-        JSONObject state = loadMacAutomationState();
-        if (state == null || !activeHost.equals(state.optString("routerHost", ""))) {
-            macAutomationBusy = false;
-            macAutomationRunning = false;
-            preferences.edit().putBoolean(PREF_MAC_AUTO_ENABLED, false).apply();
-            updateMacAutomationUi("عنوان الراوتر الحالي يختلف عن الراوتر الذي حُفظت له السياسات. أوقفت الأتمتة لمنع تعديل جهاز آخر.");
-            return;
-        }
-        int hour = clock.optInt("hour", -1);
-        int minute = clock.optInt("minute", -1);
-        int day = clock.optInt("weekday", -1);
-        String date = clock.optString("date", "");
-        if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || day < 0 || day > 6 || date.isEmpty()) {
-            macAutomationBusy = false;
-            updateMacAutomationUi("ساعة الراوتر غير مكتملة أو غير صالحة؛ لم يتم تغيير أي سياسة.");
-            scheduleNextMacAutomationTick(MAC_AUTO_INTERVAL_MS);
-            return;
-        }
-
-        JSONArray policies = state.optJSONArray("policies");
-        boolean staleModification = false;
-        if (policies != null) {
-            for (int i = 0; i < policies.length(); i++) {
-                JSONObject p = policies.optJSONObject(i);
-                if (p == null) continue;
-                String modifiedDate = p.optBoolean("pending", false)
-                        ? p.optString("pendingDate", p.optString("modifiedDate", ""))
-                        : p.optString("modifiedDate", "");
-                if ((p.optBoolean("modified", false) || p.optBoolean("pending", false))
-                        && !modifiedDate.isEmpty() && !modifiedDate.equals(date)) {
-                    staleModification = true;
-                    break;
-                }
-            }
-        }
-        boolean restoreMode = hour >= 23 || staleModification;
-        List<JSONObject> operations = new ArrayList<>();
-        if (policies != null) {
-            for (int i = 0; i < policies.length(); i++) {
-                JSONObject p = policies.optJSONObject(i);
-                if (p == null) continue;
-                if (restoreMode) {
-                    if (p.optBoolean("modified", false) || p.optBoolean("pending", false)) operations.add(p);
-                } else if (!p.optBoolean("modified", false) && !p.optBoolean("pending", false)) {
-                    int sh = p.optInt("startHour", -1);
-                    int sm = p.optInt("startMinute", -1);
-                    int sd = p.optInt("startDay", -1);
-                    int ed = p.optInt("endDay", -1);
-                    if (MacScheduleLogic.shouldZeroStart(hour, minute, sh, sm, day, sd, ed)) operations.add(p);
-                }
-            }
-        }
-        if (operations.isEmpty()) {
-            macAutomationBusy = false;
-            updateMacAutomationUi("نشط | ساعة الراوتر " + two(hour) + ":" + two(minute)
-                    + " | السياسات المحفوظة " + (policies == null ? 0 : policies.length())
-                    + " | تصفيرات هذه الجلسة " + macAutomationZeroedCount
-                    + " | استعادة " + macAutomationRestoredCount + " | موعد الاستعادة 23:00.");
-            scheduleNextMacAutomationTick(MAC_AUTO_INTERVAL_MS);
-            return;
-        }
-        processMacPolicyOperations(operations, 0, restoreMode, date, () -> {
-            if (macAutomationStopping) {
-                restorePendingMacChangesNow();
-                return;
-            }
-            macAutomationBusy = false;
-            JSONObject latest = loadMacAutomationState();
-            updateMacAutomationUi((restoreMode ? "مرحلة الاستعادة" : "مرحلة التصفير") + " | ساعة الراوتر "
-                    + two(hour) + ":" + two(minute) + " | نجاح التصفير " + macAutomationZeroedCount
-                    + " | نجاح الاستعادة " + macAutomationRestoredCount
-                    + (hasModifiedMacPolicies(latest) ? " | توجد أوقات مؤقتة محفوظة" : " | لا توجد أوقات مؤقتة حالياً"));
-            scheduleNextMacAutomationTick(2500L);
-        });
-    }
-
-    private void processMacPolicyOperations(List<JSONObject> operations, int index, boolean restore,
-                                            String date, Runnable onComplete) {
-        if (macAutomationStopping && !restore) {
-            onComplete.run();
-            return;
-        }
-        if (index >= operations.size()) {
-            onComplete.run();
-            return;
-        }
-        JSONObject policy = operations.get(index);
-        executeMacPolicyOperation(policy, restore, date, (success, message) -> {
-            if (!success && message != null && !message.isEmpty()) {
-                updateMacAutomationUi((restore ? "تعذر استعادة سياسة " : "تعذر تصفير سياسة ")
-                        + policy.optString("number", "?") + ": " + message);
-            }
-            handler.postDelayed(() -> processMacPolicyOperations(operations, index + 1, restore, date, onComplete), 350L);
-        });
-    }
-
-    private void executeMacPolicyOperation(JSONObject original, boolean restore, String date,
-                                           PolicyOperationCallback callback) {
-        int number = original.optInt("number", -1);
-        if (number < 1) {
-            callback.onResult(false, "رقم السياسة غير صالح.");
-            return;
-        }
-        readMacPolicyAt(number, 0, (current, error) -> {
-            if (error != null || current == null) {
-                callback.onResult(false, error == null ? "تعذرت قراءة السياسة." : error);
-                return;
-            }
-            String expectedMac = normalizeMac(original.optString("mac", ""));
-            String currentMac = normalizeMac(current.optString("mac", ""));
-            if (!expectedMac.equals(currentMac)) {
-                clearPending(original);
-                saveMacPolicyState(original);
-                callback.onResult(false, "عنوان MAC تغيّر؛ حمايةً للجهاز لم أعدّل هذه السياسة.");
-                return;
-            }
-            int originalHour = original.optInt("startHour", -1);
-            int originalMinute = original.optInt("startMinute", -1);
-            int currentHour = current.optInt("startHour", -1);
-            int currentMinute = current.optInt("startMinute", -1);
-            int targetHour = restore ? originalHour : 0;
-            int targetMinute = restore ? originalMinute : 0;
-            if (targetHour < 0 || targetHour > 23 || targetMinute < 0 || targetMinute > 59) {
-                callback.onResult(false, "وقت البداية الأصلي غير صالح.");
-                return;
-            }
-
-            boolean pending = original.optBoolean("pending", false);
-            int pendingHour = original.optInt("pendingTargetHour", -1);
-            int pendingMinute = original.optInt("pendingTargetMinute", -1);
-            if (pending && currentHour == pendingHour && currentMinute == pendingMinute) {
-                boolean wasZero = "zero".equals(original.optString("pendingOperation", ""));
-                markMacOperationComplete(original, wasZero, date);
-                if (wasZero) macAutomationZeroedCount++; else macAutomationRestoredCount++;
-                callback.onResult(true, "تمت مطابقة عملية سابقة والتحقق منها.");
-                return;
-            }
-            if (currentHour == targetHour && currentMinute == targetMinute) {
-                if (restore) {
-                    markMacOperationComplete(original, false, "");
-                    macAutomationRestoredCount++;
-                } else if (pending) {
-                    markMacOperationComplete(original, true, date);
-                    macAutomationZeroedCount++;
-                }
-                callback.onResult(true, "القيمة المطلوبة موجودة بالفعل.");
-                return;
-            }
-            if (restore) {
-                if (currentHour != 0 || currentMinute != 0) {
-                    callback.onResult(false, "قيمة البداية لم تعد صفراً؛ لم أستبدل تعديلاً يدوياً.");
-                    return;
-                }
-            } else {
-                if (!"pass".equalsIgnoreCase(current.optString("filterMode", ""))) {
-                    callback.onResult(false, "وضع التصفية لم يعد Permit Only.");
-                    return;
-                }
-                if (!current.optBoolean("enabled", false)) {
-                    callback.onResult(false, "السياسة لم تعد مفعّلة.");
-                    return;
-                }
-                if (currentHour != originalHour || currentMinute != originalMinute) {
-                    callback.onResult(false, "وقت البداية تغيّر يدوياً؛ لم أستبدل القيمة الجديدة.");
-                    return;
-                }
-                if (current.optInt("startDay", -1) != original.optInt("startDay", -2)
-                        || current.optInt("endDay", -1) != original.optInt("endDay", -2)) {
-                    callback.onResult(false, "أيام السياسة تغيّرت؛ تم تجاوزها لحماية الجدول.");
-                    return;
-                }
-            }
-
-            setMacPending(original, restore ? "restore" : "zero", targetHour, targetMinute, date);
-            saveMacPolicyState(original);
-            submitMacPolicyStart(number, expectedMac, targetHour, targetMinute, submitted -> {
-                if (!submitted) {
-                    clearPending(original);
-                    saveMacPolicyState(original);
-                    callback.onResult(false, "لم يقبل نموذج الراوتر أمر الحفظ؛ بقيت القيم الأصلية كما هي.");
-                    return;
-                }
-                handler.postDelayed(() -> reloadMacAutomationFrame(() -> readMacPolicyAt(number, 0, (verified, verifyError) -> {
-                    if (verifyError != null || verified == null
-                            || !expectedMac.equals(normalizeMac(verified.optString("mac", "")))
-                            || verified.optInt("startHour", -1) != targetHour
-                            || verified.optInt("startMinute", -1) != targetMinute) {
-                        callback.onResult(false, "أُرسل الحفظ لكن لم أتحقق من القيمة بعد؛ لم أعتبر العملية ناجحة.");
-                        return;
-                    }
-                    markMacOperationComplete(original, !restore, date);
-                    if (restore) macAutomationRestoredCount++;
-                    else macAutomationZeroedCount++;
-                    callback.onResult(true, "تم الحفظ والتحقق.");
-                })), 1700L);
-            });
-        });
-    }
-
-    private void submitMacPolicyStart(int number, String expectedMac, int hour, int minute,
-                                      final BooleanResult callback) {
-        String js = "(function(){try{" +
-                "var f=document.getElementById('tendaW303MacAutomationFrame');if(!f||!f.contentDocument)return JSON.stringify({ok:false,error:'إطار MAC غير جاهز'});" +
-                "var d=f.contentDocument,form=d.forms['frmSetup']||d.querySelector('form'),sel=d.getElementById('curNum');" +
-                "if(!form||!sel||String(sel.value)!==" + JSONObject.quote(String.valueOf(number)) + ")return JSON.stringify({ok:false,error:'السياسة المختارة لا تطابق الرقم المطلوب'});" +
-                "var action='';try{action=new URL(form.action,d.location.href).pathname;}catch(e){};" +
-                "if(action!='/goform/SafeMacFilter'||String(form.method||'').toLowerCase()!=='post')return JSON.stringify({ok:false,error:'مسار أو طريقة الحفظ غير مطابقة'});" +
-                "var parts=form.querySelectorAll('input[id=\\\"mac\\\"]'),mac=[];for(var i=0;i<parts.length;i++)mac.push((parts[i].value||'').trim().toUpperCase());" +
-                "if(mac.join(':').replace(/[^0-9A-F]/g,'')!==" + JSONObject.quote(expectedMac) + ")return JSON.stringify({ok:false,error:'MAC لا يطابق النسخة المحفوظة'});" +
-                "var sh=form.querySelector('#sh'),sm=form.querySelector('#sm');if(!sh||!sm)return JSON.stringify({ok:false,error:'حقول البداية غير موجودة'});" +
-                "if(typeof d.defaultView.preSubmit!=='function')return JSON.stringify({ok:false,error:'دالة preSubmit غير موجودة'});" +
-                "sh.value=" + JSONObject.quote(String.valueOf(hour)) + ";sm.value=" + JSONObject.quote(String.valueOf(minute)) + ";" +
-                "form.target=f.name||'tendaW303MacAutomationFrame';" +
-                "var buttons=form.querySelectorAll('input[type=button],button');var ok=null;for(var b=0;b<buttons.length;b++){var v=(buttons[b].value||buttons[b].textContent||'').trim().toLowerCase();if(v==='ok'){ok=buttons[b];break;}}" +
-                "if(ok)ok.click();else d.defaultView.preSubmit(form);" +
-                "return JSON.stringify({ok:true,submitted:true,number:sel.value,mac:mac.join(':')});" +
-                "}catch(e){return JSON.stringify({ok:false,error:String(e)});}})()";
-        webView.evaluateJavascript(js, raw -> {
-            JSONObject result = parseJsJson(raw);
-            callback.onResult(result != null && result.optBoolean("ok", false));
-        });
-    }
-
-    private void reloadMacAutomationFrame(Runnable callback) {
-        String js = "(function(){var f=document.getElementById('tendaW303MacAutomationFrame');if(!f)return false;f.src=location.protocol+'//'+location.host+'/firewall_mac.asp?__tenda_auto='+Date.now();return true;})()";
-        webView.evaluateJavascript(js, result -> handler.postDelayed(callback, 950L));
-    }
-
-    private void ensureMacAutomationFrames(int attempt, Runnable callback) {
-        if (webView == null) return;
-        String js = "(function(){try{var base=location.protocol+'//'+location.host;function add(id,path){var f=document.getElementById(id);if(!f){f=document.createElement('iframe');f.id=id;f.name=id;f.setAttribute('aria-hidden','true');f.style.cssText='position:absolute;left:-10000px;top:-10000px;width:1px;height:1px;border:0;';f.src=base+path;(document.body||document.documentElement).appendChild(f);}return f;}" +
-                "var m=add('tendaW303MacAutomationFrame','/firewall_mac.asp');var t=add('tendaW303ClockFrame','/system_hostname.asp');" +
-                "var md=m.contentDocument,td=t.contentDocument;try{var mp=md&&md.location?new URL(md.location.href).pathname:'';if(md&&md.readyState==='complete'&&(mp!='/firewall_mac.asp'||!md.getElementById('curNum')))m.src=base+'/firewall_mac.asp?__tenda_auto='+Date.now();}catch(e){m.src=base+'/firewall_mac.asp?__tenda_auto='+Date.now();}" +
-                "var ready=!!(md&&md.readyState==='complete'&&md.getElementById('curNum')&&(md.forms['frmSetup']||md.querySelector('form')));return JSON.stringify({mac:ready,clock:!!(td&&td.readyState==='complete')});" +
-                "}catch(e){return JSON.stringify({error:String(e)});}})()";
-        webView.evaluateJavascript(js, raw -> {
-            JSONObject result = parseJsJson(raw);
-            if (result != null && result.optBoolean("mac", false) && result.optBoolean("clock", false)) {
-                callback.run();
-            } else if (attempt < 14) {
-                handler.postDelayed(() -> ensureMacAutomationFrames(attempt + 1, callback), 500L);
-            } else {
-                macAutomationBusy = false;
-                updateMacAutomationUi("لم أتمكن من تحميل صفحة MAC أو Time Settings داخل إطار آمن. سجّل الدخول إلى الراوتر وتأكد من فتح واجهته أولاً. لم يتم إرسال أي تغيير.");
-            }
-        });
-    }
-
-    private void readAllMacPolicies(PolicyListCallback callback) {
-        String js = "(function(){var f=document.getElementById('tendaW303MacAutomationFrame'),d=f&&f.contentDocument,s=d&&d.getElementById('curNum');if(!s)return JSON.stringify({ok:false,error:'لم أجد curNum في صفحة MAC'});var a=[];for(var i=0;i<s.options.length;i++)a.push(String(s.options[i].value));return JSON.stringify({ok:true,selected:String(s.value),options:a});})()";
-        webView.evaluateJavascript(js, raw -> {
-            JSONObject options = parseJsJson(raw);
-            if (options == null || !options.optBoolean("ok", false)) {
-                callback.onResult(null, options == null ? "تعذر قراءة قائمة السياسات." : options.optString("error"));
-                return;
-            }
-            JSONArray arr = options.optJSONArray("options");
-            if (arr == null || arr.length() == 0 || arr.length() > 10) {
-                callback.onResult(null, "عدد سياسات MAC غير متوقع؛ توقفت دون تعديل.");
-                return;
-            }
-            List<String> numbers = new ArrayList<>();
-            for (int i = 0; i < arr.length(); i++) numbers.add(arr.optString(i));
-            List<JSONObject> policies = new ArrayList<>();
-            readMacPolicyListAt(numbers, 0, policies, options.optString("selected", "1"), callback);
-        });
-    }
-
-    private void readMacPolicyListAt(List<String> numbers, int index, List<JSONObject> policies,
-                                     String previousSelection, PolicyListCallback callback) {
-        if (index >= numbers.size()) {
-            int previous;
-            try { previous = Integer.parseInt(previousSelection); } catch (Exception e) { previous = 1; }
-            readMacPolicyAt(previous, 0, (ignored, error) -> callback.onResult(policies, null));
-            return;
-        }
-        int number;
-        try { number = Integer.parseInt(numbers.get(index)); }
-        catch (Exception e) { callback.onResult(null, "قيمة رقم السياسة غير صالحة."); return; }
-        readMacPolicyAt(number, 0, (policy, error) -> {
-            if (error != null || policy == null) {
-                callback.onResult(null, "تعذرت قراءة السياسة " + number + ": " + (error == null ? "بيانات ناقصة" : error));
-                return;
-            }
-            policies.add(policy);
-            readMacPolicyListAt(numbers, index + 1, policies, previousSelection, callback);
-        });
-    }
-
-    private void readMacPolicyAt(int number, int attempt, JsonResultCallback callback) {
-        String selectJs = "(function(){try{var f=document.getElementById('tendaW303MacAutomationFrame'),d=f&&f.contentDocument,s=d&&d.getElementById('curNum'),form=d&&(d.forms['frmSetup']||d.querySelector('form'));if(!s||!form)return JSON.stringify({ok:false,error:'صفحة MAC غير جاهزة'});var n=" + JSONObject.quote(String.valueOf(number)) + ";var found=false;for(var i=0;i<s.options.length;i++)if(String(s.options[i].value)===n)found=true;if(!found)return JSON.stringify({ok:false,error:'رقم السياسة غير موجود'});if(String(s.value)!==n){s.value=n;if(typeof s.onchange==='function')s.onchange.call(s);else if(typeof d.defaultView.onChangeNum==='function')d.defaultView.onChangeNum(form);else s.dispatchEvent(new d.defaultView.Event('change',{bubbles:true}));}return JSON.stringify({ok:true,selected:String(s.value)});}catch(e){return JSON.stringify({ok:false,error:String(e)});}})()";
-        webView.evaluateJavascript(selectJs, raw -> {
-            JSONObject selected = parseJsJson(raw);
-            if (selected == null || !selected.optBoolean("ok", false)) {
-                if (attempt < 3) handler.postDelayed(() -> readMacPolicyAt(number, attempt + 1, callback), 450L);
-                else callback.onResult(null, selected == null ? "تعذر اختيار السياسة." : selected.optString("error"));
-                return;
-            }
-            handler.postDelayed(() -> {
-                String readJs = "(function(){try{var f=document.getElementById('tendaW303MacAutomationFrame'),d=f&&f.contentDocument,s=d&&d.getElementById('curNum'),form=d&&(d.forms['frmSetup']||d.querySelector('form'));if(!s||!form||String(s.value)!==" + JSONObject.quote(String.valueOf(number)) + ")return JSON.stringify({ok:false,error:'لم تكتمل قراءة السياسة المختارة'});" +
-                        "function v(id){var e=form.querySelector('#'+id);return e?String(e.value||''):'';}var parts=form.querySelectorAll('input[id=\\\"mac\\\"]'),m=[];for(var i=0;i<parts.length;i++)m.push((parts[i].value||'').trim().toUpperCase());" +
-                        "var en=form.querySelector('#en'),fm=form.querySelector('#filter_mode');var a={ok:true,number:parseInt(s.value,10),filterMode:fm?String(fm.value):'',name:v('remark'),mac:m.join(':'),startHour:parseInt(v('sh'),10),startMinute:parseInt(v('sm'),10),endHour:parseInt(v('eh'),10),endMinute:parseInt(v('em'),10),startDay:parseInt(v('startw'),10),endDay:parseInt(v('endw'),10),enabled:!!(en&&en.checked),formAction:(function(){try{return new URL(form.action,d.location.href).pathname;}catch(e){return '';}})(),formMethod:String(form.method||'').toLowerCase()};return JSON.stringify(a);}catch(e){return JSON.stringify({ok:false,error:String(e)});}})()";
-                webView.evaluateJavascript(readJs, readRaw -> {
-                    JSONObject policy = parseJsJson(readRaw);
-                    if (policy == null || !policy.optBoolean("ok", false)) {
-                        if (attempt < 3) handler.postDelayed(() -> readMacPolicyAt(number, attempt + 1, callback), 450L);
-                        else callback.onResult(null, policy == null ? "تعذر قراءة حقول السياسة." : policy.optString("error"));
-                        return;
-                    }
-                    String mac = normalizeMac(policy.optString("mac", ""));
-                    if (!mac.isEmpty()) {
-                        try { policy.put("mac", mac); } catch (JSONException ignored) { }
-                    }
-                    callback.onResult(policy, null);
-                });
-            }, 500L);
-        });
-    }
-
-    private void readRouterClock(ClockCallback callback) {
-        String refresh = "(function(){var f=document.getElementById('tendaW303ClockFrame');if(!f)return JSON.stringify({ok:false,error:'إطار ساعة الراوتر غير موجود'});f.src=location.protocol+'//'+location.host+'/system_hostname.asp?__tenda_clock='+Date.now();return JSON.stringify({ok:true});})()";
-        webView.evaluateJavascript(refresh, raw -> handler.postDelayed(() -> {
-            String read = "(function(){try{var f=document.getElementById('tendaW303ClockFrame'),d=f&&f.contentDocument;if(!d||d.readyState!=='complete')return JSON.stringify({ok:false,error:'صفحة Time Settings لم تكتمل'});" +
-                    "var names=['year','month','day','hour','minute','second'],o={};function numeric(e){return e&&/^\\d+$/.test(String(e.value||'').trim())?parseInt(e.value,10):null;}" +
-                    "for(var n=0;n<names.length;n++){var key=names[n],els=d.querySelectorAll('input');for(var i=0;i<els.length;i++){var id=((els[i].id||'')+' '+(els[i].name||'')).toLowerCase();if(id===key||id.indexOf(key)>=0){o[key]=numeric(els[i]);break;}}}" +
-                    "if(names.some(function(n){return typeof o[n]!=='number';})){var ins=d.querySelectorAll('input[type=text],input:not([type])'),vals=[];for(var j=0;j<ins.length;j++){var v=String(ins[j].value||'').trim();if(/^\\d+$/.test(v))vals.push(parseInt(v,10));}var y=-1;for(var k=0;k<vals.length;k++)if(vals[k]>=2000&&vals[k]<=2099){y=k;break;}if(y>=0&&vals.length>=y+6){o={year:vals[y],month:vals[y+1],day:vals[y+2],hour:vals[y+3],minute:vals[y+4],second:vals[y+5]};}}" +
-                    "if(!(o.year>=2000&&o.year<=2099&&o.month>=1&&o.month<=12&&o.day>=1&&o.day<=31&&o.hour>=0&&o.hour<=23&&o.minute>=0&&o.minute<=59&&o.second>=0&&o.second<=59))return JSON.stringify({ok:false,error:'لم أتعرف على حقول التاريخ والوقت في صفحة Time Settings'});" +
-                    "var dt=new Date(o.year,o.month-1,o.day,12,0,0),wd=dt.getDay();o.weekday=wd;o.date=String(o.year)+'-'+('0'+o.month).slice(-2)+'-'+('0'+o.day).slice(-2);o.ok=true;return JSON.stringify(o);}catch(e){return JSON.stringify({ok:false,error:String(e)});}})()";
-            webView.evaluateJavascript(read, readRaw -> {
-                JSONObject clock = parseJsJson(readRaw);
-                if (clock == null || !clock.optBoolean("ok", false)) callback.onResult(null, clock == null ? "تعذر قراءة ساعة الراوتر." : clock.optString("error"));
-                else callback.onResult(clock, null);
-            });
-        }, 900L));
-    }
-
-    private JSONObject parseJsJson(String raw) {
-        if (raw == null || raw.equals("null")) return null;
+        preferences.edit().putBoolean(RouterBackgroundService.PREF_MAC_AUTO_ENABLED, false)
+                .putBoolean(RouterBackgroundService.PREF_MAC_AUTO_STOPPING, true).apply();
+        Intent service = new Intent(this, RouterBackgroundService.class)
+                .setAction(RouterBackgroundService.ACTION_MAC_STOP)
+                .putExtra(RouterBackgroundService.EXTRA_ROUTER_HOST, activeHost);
         try {
-            String value = raw;
-            if (raw.startsWith("\"")) {
-                JSONArray wrapper = new JSONArray("[" + raw + "]");
-                value = wrapper.optString(0, "");
-            }
-            return new JSONObject(value);
-        } catch (Exception ignored) { return null; }
-    }
-
-    private JSONObject loadMacAutomationState() {
-        if (preferences == null) return null;
-        String raw = preferences.getString(PREF_MAC_AUTO_STATE, "");
-        if (raw == null || raw.trim().isEmpty()) return null;
-        try { return new JSONObject(raw); } catch (Exception ignored) { return null; }
-    }
-
-    private void saveMacAutomationState(JSONObject state) {
-        if (preferences != null && state != null) preferences.edit().putString(PREF_MAC_AUTO_STATE, state.toString()).apply();
-    }
-
-    private void saveMacPolicyState(JSONObject changedPolicy) {
-        if (changedPolicy == null) return;
-        JSONObject state = loadMacAutomationState();
-        JSONArray policies = state == null ? null : state.optJSONArray("policies");
-        if (policies == null) return;
-        int number = changedPolicy.optInt("number", -1);
-        for (int i = 0; i < policies.length(); i++) {
-            JSONObject current = policies.optJSONObject(i);
-            if (current != null && current.optInt("number", -2) == number) {
-                try {
-                    policies.put(i, new JSONObject(changedPolicy.toString()));
-                    state.put("policies", policies);
-                    saveMacAutomationState(state);
-                } catch (Exception ignored) { }
-                return;
-            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(service);
+            else startService(service);
+            updateMacAutomationUi("طلبت إيقاف التصفير. ستبقى الخدمة تعمل حتى تستعيد كل سياسة تم تعديلها.");
+            toast("سيتم إيقاف الأتمتة بعد استعادة أوقات السياسات.");
+        } catch (Exception e) {
+            updateMacAutomationUi("تعذر إرسال طلب الاستعادة: " + (e.getMessage() == null ? "خطأ غير معروف" : e.getMessage()));
         }
     }
-
-    private boolean hasModifiedMacPolicies(JSONObject state) {
-        if (state == null) return false;
-        JSONArray a = state.optJSONArray("policies");
-        if (a == null) return false;
-        for (int i = 0; i < a.length(); i++) {
-            JSONObject p = a.optJSONObject(i);
-            if (p != null && (p.optBoolean("modified", false) || p.optBoolean("pending", false))) return true;
-        }
-        return false;
-    }
-
-    private boolean hasPendingMacRestoration() {
-        return hasModifiedMacPolicies(loadMacAutomationState());
-    }
-
-    private List<JSONObject> modifiedPolicies(JSONObject state) {
-        List<JSONObject> out = new ArrayList<>();
-        JSONArray a = state == null ? null : state.optJSONArray("policies");
-        if (a != null) for (int i = 0; i < a.length(); i++) {
-            JSONObject p = a.optJSONObject(i);
-            if (p != null && (p.optBoolean("modified", false) || p.optBoolean("pending", false))) out.add(p);
-        }
-        return out;
-    }
-
-    private void setMacPending(JSONObject policy, String operation, int hour, int minute, String date) {
-        try {
-            policy.put("pending", true);
-            policy.put("pendingOperation", operation);
-            policy.put("pendingTargetHour", hour);
-            policy.put("pendingTargetMinute", minute);
-            policy.put("pendingDate", date == null ? "" : date);
-            saveMacPolicyState(policy);
-        } catch (JSONException ignored) { }
-    }
-
-    private void clearPending(JSONObject policy) {
-        try {
-            policy.put("pending", false);
-            policy.remove("pendingOperation");
-            policy.remove("pendingTargetHour");
-            policy.remove("pendingTargetMinute");
-            policy.remove("pendingDate");
-        } catch (Exception ignored) { }
-    }
-
-    private void markMacOperationComplete(JSONObject policy, boolean modified, String date) {
-        try {
-            policy.put("modified", modified);
-            policy.put("modifiedDate", modified ? (date == null ? policy.optString("pendingDate", "") : date) : "");
-            clearPending(policy);
-            saveMacPolicyState(policy);
-        } catch (Exception ignored) { }
-    }
-
-    private String routerDateFromStateOrToday() {
-        JSONObject state = loadMacAutomationState();
-        JSONArray a = state == null ? null : state.optJSONArray("policies");
-        if (a != null) for (int i = 0; i < a.length(); i++) {
-            JSONObject p = a.optJSONObject(i);
-            if (p != null && !p.optString("modifiedDate", "").isEmpty()) return p.optString("modifiedDate");
-        }
-        return new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date());
-    }
-
-    private boolean isValidMacValue(String mac) {
-        return normalizeMac(mac).matches("[0-9A-F]{12}");
-    }
-
-    private String normalizeMac(String mac) {
-        if (mac == null) return "";
-        return mac.replaceAll("[^0-9A-Fa-f]", "").toUpperCase(Locale.ROOT);
-    }
-
-    private String two(int value) { return value < 10 ? "0" + value : String.valueOf(value); }
 
     private void updateMacAutomationUi(String message) {
         if (macAutomationStatusView != null) macAutomationStatusView.setText(message);
-        if (macAutomationStartButton != null) macAutomationStartButton.setEnabled(!macAutomationRunning && !macAutomationBusy);
-        if (macAutomationStopButton != null) macAutomationStopButton.setEnabled(macAutomationRunning || macAutomationBusy || hasPendingMacRestoration());
-    }
-
-    private void scheduleNextMacAutomationTick(long delay) {
-        handler.removeCallbacks(macAutomationRunnable);
-        if (macAutomationRunning) handler.postDelayed(macAutomationRunnable, delay);
+        if (macAutomationStartButton != null) macAutomationStartButton.setEnabled(!macAutomationRunning);
+        if (macAutomationStopButton != null) macAutomationStopButton.setEnabled(macAutomationRunning
+                || preferences.getBoolean(RouterBackgroundService.PREF_MAC_AUTO_STOPPING, false));
     }
 
     private void inspectCurrentPage() {
@@ -2859,6 +2311,7 @@ public class MainActivity extends Activity {
         IntentFilter filter = new IntentFilter();
         filter.addAction(RouterBackgroundService.ACTION_STATUS);
         filter.addAction(RouterBackgroundService.ACTION_TRAFFIC);
+        filter.addAction(RouterBackgroundService.ACTION_MAC_STATUS);
         try {
             if (Build.VERSION.SDK_INT >= 33) {
                 registerReceiver(backgroundMonitorReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
@@ -2875,12 +2328,14 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         liveMonitorRunning = preferences.getBoolean(RouterBackgroundService.PREF_ENABLED, false);
+        macAutomationRunning = preferences.getBoolean(RouterBackgroundService.PREF_MAC_AUTO_ENABLED, false)
+                || preferences.getBoolean(RouterBackgroundService.PREF_MAC_AUTO_STOPPING, false)
+                || hasPendingMacRestoreInPreferences();
         updateLiveControls();
+        updateMacAutomationUi(macAutomationRunning
+                ? "أتمتة MAC محفوظة في الخدمة الخلفية؛ تستمر حتى عند إغلاق واجهة التطبيق."
+                : "التصفير التلقائي متوقف.");
         restoreLastTrafficSnapshot();
-        if (macAutomationRunning && webView != null && webView.getUrl() != null) {
-            handler.removeCallbacks(macAutomationRunnable);
-            handler.post(macAutomationRunnable);
-        }
     }
 
     @Override
@@ -2902,7 +2357,6 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         handler.removeCallbacks(liveMonitorRunnable);
-        handler.removeCallbacks(macAutomationRunnable);
         if (webView != null) {
             webView.removeJavascriptInterface("TendaBridge");
             webView.stopLoading();

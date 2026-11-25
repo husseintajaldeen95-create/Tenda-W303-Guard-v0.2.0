@@ -1,3 +1,25 @@
+## 0.2.22 — Restore Original MAC Start Times at 23:55
+
+- Changed the daily restoration threshold from 23:00 to 23:55 using the router's hour and minute.
+- Allowed policies with start times from 23:00 through 23:54 to be zeroed at their own start time; no new zeroing starts at or after 23:55.
+- Kept per-policy zeroing times, policy-number identity, same-time policy counting, background monitoring, reconnection, and pending-operation recovery unchanged.
+- Preserved the existing `.github/workflows/android.yml` workflow file without modifying its contents.
+- Added regression checks for 23:54 (not yet restore), 23:55 (restore), and times after 23:55.
+
+## 0.2.21 — Background MAC Automation + Subscriber Monitoring
+
+- نقل محرك تصفير واستعادة سياسات MAC من `MainActivity` إلى `RouterBackgroundService` حتى يستمر بعد إغلاق واجهة التطبيق.
+- جعل خدمة الخلفية الواحدة تنفذ مراقبة Traffic Statistics وأتمتة MAC معاً، وتبقى منتظرة عند انقطاع Wi-Fi أو عدم استجابة الراوتر.
+- الحفاظ على وقت البداية الأصلي لكل رقم سياسة؛ هوية السياسة هي رقم الخانة، وليس وقت البداية. السياسات المختلفة ذات الوقت المتطابق تُقرأ وتُحتسب وتُصفّر وتُستعاد كل واحدة على حدة.
+- إضافة ملخص يوضح عدد خانات الراوتر، وعدد السياسات المؤهلة، وأرقامها وأوقات بدايتها.
+- تحسين التعامل مع الحفظ غير المؤكد: تبقى العملية `pending` حتى يعاد التحقق منها، ولا تُمسح الحالة لمجرد انقطاع الرد.
+- التحقق بعد الحفظ من MAC ورقم السياسة ووقت البداية والاسم ووقت النهاية والأيام وحالة Enable ووضع Filter Mode.
+- عند طلب إيقاف أتمتة MAC، تبقى الخدمة عاملة حتى تستعيد السياسات التي سبق أن عدّلتها؛ ولا تتوقف مراقبة Traffic Statistics إلا بطلب مستقل.
+- تخزين بيانات HTTP Authentication في WebViewDatabase حتى تتمكن WebView الخلفية من إعادة استخدام جلسة الدخول التي أنشأها المستخدم داخل التطبيق.
+- توسيع إعادة التشغيل بعد إقلاع الهاتف لتشمل أتمتة MAC وحالات الاستعادة المعلّقة.
+- إضافة اختبار يثبت أن ست سياسات بأرقام مختلفة تُحتسب ستاً حتى لو تشابهت أوقات بدايتها؛ تكرار رقم الخانة وحده هو الذي يُزال.
+- لم يُبنَ APK في بيئة إعداد هذا المصدر ولم يُختبر إرسال POST على الراوتر الحقيقي بعد؛ يلزم GitHub Actions واختبار ميداني قبل اعتماد التنفيذ النهائي.
+
 ## 0.2.20 — Background Traffic Monitor and Network Recovery
 
 - Added an Android foreground service with an independent WebView for `QoS > Traffic Statistics`.
