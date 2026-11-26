@@ -6,6 +6,10 @@ public final class MacScheduleLogicTest {
 
     public static void main(String[] args) {
         zerosEachPolicyOnlyAfterItsOwnStart();
+        catchesUpMissedStartAfterMidnight();
+        doesNotRepeatAnAlreadyProcessedOccurrence();
+        respectsTrackingStartForNewPolicies();
+        retriesPendingZeroAndRestoresStalePoliciesIndependently();
         doesNotZeroBeforeStartOrAtRestoreTime();
         skipsAlwaysOnPolicies();
         respectsWeekdayRangesIncludingWraparound();
@@ -22,6 +26,52 @@ public final class MacScheduleLogicTest {
         check(!MacScheduleLogic.shouldZeroStart(15, 59, 16, 0, 1, 0, 6), "16:00 policy remains unchanged at 15:59");
         check(MacScheduleLogic.shouldZeroStart(16, 0, 16, 0, 1, 0, 6), "16:00 policy zeroes at 16:00");
         check(MacScheduleLogic.shouldZeroStart(19, 10, 14, 0, 1, 0, 6), "missed start is handled later the same day");
+    }
+
+    private static void catchesUpMissedStartAfterMidnight() {
+        check(MacScheduleLogic.shouldZeroStartWithCatchUp(8, 0, 18, 0, 3, 0, 6,
+                "2026-11-25", "2026-11-23", "2026-11-20"),
+                "missed Tuesday 18:00 start is caught up Wednesday morning");
+        check(MacScheduleLogic.shouldZeroStartWithCatchUp(8, 0, 18, 0, 3, 1, 5,
+                "2026-11-25", "2026-11-23", "2026-11-20"),
+                "previous eligible weekday occurrence is caught up within the active weekday range");
+        check(!MacScheduleLogic.shouldZeroStartWithCatchUp(8, 0, 18, 0, 3, 0, 6,
+                "2026-11-25", "2026-11-24", "2026-11-20"),
+                "no catch-up when the previous day's occurrence was already zeroed");
+        check(!MacScheduleLogic.shouldZeroStartWithCatchUp(8, 0, 18, 0, 3, 3, 5,
+                "2026-11-25", "2026-11-23", "2026-11-20"),
+                "no catch-up when the previous weekday is outside the policy's active range");
+    }
+
+    private static void doesNotRepeatAnAlreadyProcessedOccurrence() {
+        check(!MacScheduleLogic.shouldZeroStartWithCatchUp(8, 0, 18, 0, 4, 0, 6,
+                "2026-11-26", "2026-11-25", "2026-11-20"),
+                "a policy restored after yesterday's zero is not zeroed again before today's start");
+        check(MacScheduleLogic.shouldZeroStartWithCatchUp(18, 0, 18, 0, 4, 0, 6,
+                "2026-11-26", "2026-11-25", "2026-11-20"),
+                "today's occurrence becomes due at its own start time");
+    }
+
+    private static void respectsTrackingStartForNewPolicies() {
+        check(!MacScheduleLogic.shouldZeroStartWithCatchUp(8, 0, 18, 0, 3, 0, 6,
+                "2026-11-25", "", "2026-11-25"),
+                "new policy is not retroactively zeroed for the day before it was first tracked");
+        check(MacScheduleLogic.shouldZeroStartWithCatchUp(18, 0, 18, 0, 3, 0, 6,
+                "2026-11-25", "", "2026-11-25"),
+                "new policy is zeroed when its start time arrives on its tracking date");
+    }
+
+    private static void retriesPendingZeroAndRestoresStalePoliciesIndependently() {
+        check(MacScheduleLogic.shouldAttemptZeroPolicy(false, true, "zero"),
+                "same-day pending zero operation is retried");
+        check(!MacScheduleLogic.shouldAttemptZeroPolicy(false, true, "restore"),
+                "pending restore is not incorrectly queued as a zero operation");
+        check(MacScheduleLogic.shouldRestorePolicy(true, false, "", "2026-11-24", "2026-11-25", false),
+                "a stale modified policy is restored on its own");
+        check(!MacScheduleLogic.shouldRestorePolicy(false, false, "", "", "2026-11-25", false),
+                "a stale policy does not globally force unrelated policies into restore mode");
+        check(MacScheduleLogic.shouldRestorePolicy(true, false, "", "2026-11-25", "2026-11-25", true),
+                "daily restoration still applies at 23:55");
     }
 
     private static void doesNotZeroBeforeStartOrAtRestoreTime() {

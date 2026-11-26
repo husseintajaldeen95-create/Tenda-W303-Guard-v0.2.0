@@ -1029,6 +1029,16 @@ public class RouterBackgroundService extends Service {
                     fresh.put("pending", false);
                     fresh.put("conflict", false);
                     fresh.remove("conflictReason");
+                    if (!forceRecapture && previous != null && sameMacScheduleIdentity(previous, current)) {
+                        String trackingStartDate = previous.optString("trackingStartDate", "");
+                        if (trackingStartDate.isEmpty() && previousState != null) {
+                            long capturedAt = previousState.optLong("capturedAt", System.currentTimeMillis());
+                            trackingStartDate = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date(capturedAt));
+                        }
+                        if (!trackingStartDate.isEmpty()) fresh.put("trackingStartDate", trackingStartDate);
+                        String lastZeroDate = previous.optString("lastZeroDate", "");
+                        if (!lastZeroDate.isEmpty()) fresh.put("lastZeroDate", lastZeroDate);
+                    }
                     merged.put(fresh);
                     included[number] = true;
                 }
@@ -1072,6 +1082,19 @@ public class RouterBackgroundService extends Service {
             if (policy != null && policy.optInt("number", -1) == number) return policy;
         }
         return null;
+    }
+
+    private boolean sameMacScheduleIdentity(JSONObject first, JSONObject second) {
+        if (first == null || second == null) return false;
+        return normalizeMac(first.optString("mac", "")).equals(normalizeMac(second.optString("mac", "")))
+                && first.optInt("startHour", -1) == second.optInt("startHour", -2)
+                && first.optInt("startMinute", -1) == second.optInt("startMinute", -2)
+                && first.optInt("endHour", -1) == second.optInt("endHour", -2)
+                && first.optInt("endMinute", -1) == second.optInt("endMinute", -2)
+                && first.optInt("startDay", -1) == second.optInt("startDay", -2)
+                && first.optInt("endDay", -1) == second.optInt("endDay", -2)
+                && first.optBoolean("enabled", false) == second.optBoolean("enabled", false)
+                && first.optString("filterMode", "").equalsIgnoreCase(second.optString("filterMode", ""));
     }
 
     private boolean isMacPolicyStateProtected(JSONObject policy) {
@@ -1121,37 +1144,51 @@ public class RouterBackgroundService extends Service {
             return;
         }
         JSONArray policies = state.optJSONArray("policies");
-        boolean staleModification = false;
-        if (policies != null) {
-            for (int i = 0; i < policies.length(); i++) {
-                JSONObject policy = policies.optJSONObject(i);
-                if (policy == null) continue;
-                String modifiedDate = policy.optBoolean("pending", false)
-                        ? policy.optString("pendingDate", policy.optString("modifiedDate", ""))
-                        : policy.optString("modifiedDate", "");
-                if ((policy.optBoolean("modified", false) || policy.optBoolean("pending", false))
-                        && !modifiedDate.isEmpty() && !modifiedDate.equals(date)) {
-                    staleModification = true;
-                    break;
-                }
-            }
-        }
-        boolean restoreMode = MacScheduleLogic.isRestoreTime(hour, minute) || staleModification;
-        List<JSONObject> operations = new ArrayList<>();
+        boolean dailyRestoreDue = MacScheduleLogic.isRestoreTime(hour, minute);
+        List<JSONObject> restoreOperations = new ArrayList<>();
+        List<JSONObject> zeroOperations = new ArrayList<>();
         if (policies != null) {
             for (int i = 0; i < policies.length(); i++) {
                 JSONObject policy = policies.optJSONObject(i);
                 if (policy == null || policy.optBoolean("conflict", false)) continue;
-                if (restoreMode) {
-                    if (policy.optBoolean("modified", false) || policy.optBoolean("pending", false)) operations.add(policy);
-                } else if (!policy.optBoolean("modified", false) && !policy.optBoolean("pending", false)) {
-                    if (MacScheduleLogic.shouldZeroStart(hour, minute,
+
+                String trackingStartDate = policy.optString("trackingStartDate", "");
+                if (trackingStartDate.isEmpty()) {
+                    // New policies begin tracking on the router date first observed.
+                    // Existing policies are backfilled from the original capture date
+                    // during mergeCurrentMacPolicies().
+                    trackingStartDate = date;
+                    try { policy.put("trackingStartDate", trackingStartDate); }
+                    catch (Exception ignored) { }
+                }
+
+                boolean modified = policy.optBoolean("modified", false);
+                boolean pending = policy.optBoolean("pending", false);
+                String pendingOperation = policy.optString("pendingOperation", "");
+                String modifiedDate = pending
+                        ? policy.optString("pendingDate", policy.optString("modifiedDate", ""))
+                        : policy.optString("modifiedDate", "");
+                // Restoration is decided per policy, not globally. A stale or
+                // retrying policy must not block unrelated policies due for zeroing.
+                if (MacScheduleLogic.shouldRestorePolicy(modified, pending, pendingOperation,
+                        modifiedDate, date, dailyRestoreDue)) {
+                    restoreOperations.add(policy);
+                    continue;
+                }
+
+                if (MacScheduleLogic.shouldAttemptZeroPolicy(modified, pending, pendingOperation)) {
+                    if (MacScheduleLogic.shouldZeroStartWithCatchUp(hour, minute,
                             policy.optInt("startHour", -1), policy.optInt("startMinute", -1), day,
-                            policy.optInt("startDay", -1), policy.optInt("endDay", -1))) operations.add(policy);
+                            policy.optInt("startDay", -1), policy.optInt("endDay", -1),
+                            date, policy.optString("lastZeroDate", ""), trackingStartDate)) {
+                        zeroOperations.add(policy);
+                    }
                 }
             }
         }
-        if (operations.isEmpty()) {
+        saveMacAutomationState(state);
+
+        if (restoreOperations.isEmpty() && zeroOperations.isEmpty()) {
             macAutomationBusy = false;
             mainHandler.removeCallbacks(macAutomationWatchdog);
             int totalSlots = state.optInt("totalPolicySlots", policies == null ? 0 : policies.length());
@@ -1167,7 +1204,8 @@ public class RouterBackgroundService extends Service {
             scheduleNextMacAutomationCycle();
             return;
         }
-        processMacPolicyOperations(operations, 0, restoreMode, date, () -> {
+
+        Runnable finishCycle = () -> {
             macAutomationBusy = false;
             mainHandler.removeCallbacks(macAutomationWatchdog);
             if (isMacStopping()) {
@@ -1180,14 +1218,25 @@ public class RouterBackgroundService extends Service {
             int eligibleCount = latest == null ? 0 : latest.optInt("eligiblePolicyCount", 0);
             int pendingRestoreCount = latest == null ? 0 : modifiedPolicies(latest).size();
             int conflicts = countMacConflicts(latest);
-            updateMacStatus((restoreMode ? "مرحلة الاستعادة" : "مرحلة التصفير")
+            String phase = !restoreOperations.isEmpty() && !zeroOperations.isEmpty()
+                    ? "مرحلة الاستعادة والتصفير"
+                    : (!restoreOperations.isEmpty() ? "مرحلة الاستعادة" : "مرحلة التصفير");
+            updateMacStatus(phase
                     + " | التصفير التلقائي مفعّل | ساعة الراوتر " + two(hour) + ":" + two(minute)
                     + " | خانات مفحوصة " + totalSlots + " | سياسات مؤهلة حالياً " + eligibleCount
                     + " | بانتظار الاستعادة " + pendingRestoreCount + " | تعارضات " + conflicts
                     + " | تصفير " + macAutomationZeroedCount + " | استعادة " + macAutomationRestoredCount
                     + " | الاستعادة اليومية 23:55.");
             scheduleNextMacAutomationCycle();
-        });
+        };
+
+        Runnable runZeroOperations = () -> processMacPolicyOperations(
+                zeroOperations, 0, false, date, finishCycle);
+        if (restoreOperations.isEmpty()) {
+            runZeroOperations.run();
+        } else {
+            processMacPolicyOperations(restoreOperations, 0, true, date, runZeroOperations);
+        }
     }
 
     private void restorePendingMacChangesNow() {
@@ -1269,6 +1318,11 @@ public class RouterBackgroundService extends Service {
                 } else if (pending) {
                     markMacOperationComplete(original, true, date);
                     macAutomationZeroedCount++;
+                } else {
+                    // The router already has the zero time (for example, a manual
+                    // reset). Record this occurrence without claiming ownership, so
+                    // the app will not repeatedly retry or restore a manual change.
+                    markMacZeroAlreadyPresent(original, date);
                 }
                 callback.onResult(true, "القيمة المطلوبة موجودة بالفعل."); return;
             }
@@ -1538,8 +1592,18 @@ public class RouterBackgroundService extends Service {
     private void markMacOperationComplete(JSONObject policy, boolean modified, String date) {
         try {
             policy.put("modified", modified);
-            policy.put("modifiedDate", modified ? (date == null ? policy.optString("pendingDate", "") : date) : "");
+            String completedDate = date == null ? policy.optString("pendingDate", "") : date;
+            policy.put("modifiedDate", modified ? completedDate : "");
+            if (modified && !completedDate.isEmpty()) policy.put("lastZeroDate", completedDate);
             clearMacPending(policy); saveMacPolicyState(policy);
+        } catch (Exception ignored) { }
+    }
+
+    private void markMacZeroAlreadyPresent(JSONObject policy, String date) {
+        try {
+            if (date != null && !date.isEmpty()) policy.put("lastZeroDate", date);
+            clearMacPending(policy);
+            saveMacPolicyState(policy);
         } catch (Exception ignored) { }
     }
 
