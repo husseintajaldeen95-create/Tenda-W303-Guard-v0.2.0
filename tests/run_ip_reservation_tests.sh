@@ -8,6 +8,7 @@ javac -d "$OUT" \
   "$ROOT/app/src/main/java/com/tenda/w303guard/MacAddress.java" \
   "$ROOT/app/src/main/java/com/tenda/w303guard/IpReservationValidator.java" \
   "$ROOT/app/src/main/java/com/tenda/w303guard/MacScheduleLogic.java" \
+  "$ROOT/app/src/main/java/com/tenda/w303guard/MacPolicyReconciliationLogic.java" \
   "$ROOT/tests/java/IpReservationValidatorTest.java" \
   "$ROOT/tests/java/MacScheduleLogicTest.java"
 java -cp "$OUT" com.tenda.w303guard.IpReservationValidatorTest

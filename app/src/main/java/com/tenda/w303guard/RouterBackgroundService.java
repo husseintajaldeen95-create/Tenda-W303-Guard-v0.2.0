@@ -1333,7 +1333,7 @@ public class RouterBackgroundService extends Service {
                             + (clockError == null ? "" : clockError));
                     scheduleMacAutomation(RETRY_DELAY_MS);
                 } else {
-                    processMacAutomationClock(clock);
+                    processMacAutomationClock(clock, currentPolicies);
                 }
             });
         });
@@ -1442,6 +1442,14 @@ public class RouterBackgroundService extends Service {
         }
     }
 
+    private JSONObject findMacPolicyByNumber(List<JSONObject> policies, int number) {
+        if (policies == null) return null;
+        for (JSONObject policy : policies) {
+            if (policy != null && policy.optInt("number", -1) == number) return policy;
+        }
+        return null;
+    }
+
     private JSONObject findMacPolicyByNumber(JSONArray policies, int number) {
         if (policies == null) return null;
         for (int i = 0; i < policies.length(); i++) {
@@ -1496,36 +1504,48 @@ public class RouterBackgroundService extends Service {
                 .append("\n\n");
         JSONArray saved = state == null ? null : state.optJSONArray("policies");
         for (int number = 1; number <= 10; number++) {
-            JSONObject current = null;
-            if (currentPolicies != null) {
-                for (JSONObject item : currentPolicies) {
-                    if (item != null && item.optInt("number", -1) == number) {
-                        current = item;
-                        break;
-                    }
-                }
-            }
+            JSONObject current = findMacPolicyByNumber(currentPolicies, number);
             JSONObject tracked = findMacPolicyByNumber(saved, number);
             report.append("السياسة ").append(number).append(": ");
+
             if (tracked != null && tracked.optBoolean("conflict", false)) {
                 report.append("تعارض يحتاج مراجعة — ")
                         .append(tracked.optString("conflictReason", "تغيرت بيانات السياسة يدوياً"));
-            } else if (tracked != null && tracked.optBoolean("pending", false)) {
-                String op = tracked.optString("pendingOperation", "");
-                report.append("عملية ").append("restore".equals(op) ? "استعادة" : "تصفير")
-                        .append(" معلّقة — بانتظار التحقق أو إعادة المحاولة");
-                if (tracked.optBoolean("readError", false)) report.append(" (تعذرت إعادة القراءة في هذه الدورة)");
-            } else if (tracked != null && tracked.optBoolean("modified", false)) {
-                report.append("تم تصفيرها — تنتظر الاستعادة الساعة 23:55");
-                if (tracked.optBoolean("readError", false)) report.append(" (تعذرت إعادة القراءة في هذه الدورة)");
-            } else if ((current != null && current.optBoolean("readError", false))
-                    || (tracked != null && tracked.optBoolean("readError", false))) {
-                String readError = current == null ? "" : current.optString("readErrorMessage", "");
-                if (readError.isEmpty() && tracked != null) readError = tracked.optString("readErrorMessage", "");
-                report.append("تعذرت قراءة هذه الخانة في الدورة الحالية — لم تُعدّل هذه السياسة")
-                        .append(readError.isEmpty() ? "" : " (" + readError + ")");
-            } else if (current == null) {
-                report.append("لم تُقرأ هذه الخانة أو لا تظهر ضمن قائمة الراوتر");
+            } else if (current == null || current.optBoolean("readError", false)) {
+                String readError = current == null ? "لم تظهر الخانة ضمن القراءة الحالية"
+                        : current.optString("readErrorMessage", "تعذرت قراءة الخانة");
+                report.append("تعذر التحقق من الحالة الفعلية في الراوتر — ").append(readError);
+                if (tracked != null && (tracked.optBoolean("modified", false) || tracked.optBoolean("pending", false))) {
+                    report.append(" | توجد عملية محفوظة لم تُحسم بعد؛ لم أعتبرها ناجحة اعتماداً على البيانات القديمة");
+                }
+            } else if (tracked != null && (tracked.optBoolean("modified", false) || tracked.optBoolean("pending", false))) {
+                if (current.optInt("number", -1) != number || !samePolicyFieldsExceptStart(tracked, current)) {
+                    report.append("تعارض بين بيانات السياسة المحفوظة والقراءة الحالية؛ لم أكتب فوق التغيير");
+                } else {
+                    int currentHour = current.optInt("startHour", -1);
+                    int currentMinute = current.optInt("startMinute", -1);
+                    int originalHour = tracked.optInt("startHour", -1);
+                    int originalMinute = tracked.optInt("startMinute", -1);
+                    boolean atZero = currentHour == 0 && currentMinute == 0;
+                    boolean atOriginal = currentHour == originalHour && currentMinute == originalMinute;
+                    boolean pending = tracked.optBoolean("pending", false);
+                    String operation = tracked.optString("pendingOperation", "");
+                    if ("restore".equals(operation)) {
+                        if (atOriginal) report.append("وقت البداية الأصلي ظاهر فعلياً في الراوتر؛ تأكيد الاستعادة/تسوية الحالة محفوظة");
+                        else if (atZero) report.append("الاستعادة معلّقة — الراوتر ما زال يعرض 00:00 وستعاد المحاولة");
+                        else report.append("قيمة وقت البداية غير متوقعة: ").append(two(currentHour)).append(':').append(two(currentMinute));
+                    } else if (atZero) {
+                        report.append(pending ? "الراوتر يعرض 00:00 فعلياً؛ عملية التصفير بانتظار تثبيت الحالة" : "تم التصفير والتحقق من وقت البداية الفعلي في الراوتر");
+                    } else if (atOriginal) {
+                        report.append("لم يتم التصفير فعلياً — الراوتر ما زال يعرض الوقت الأصلي ")
+                                .append(two(currentHour)).append(':').append(two(currentMinute))
+                                .append("؛ ستتم إعادة المحاولة إذا كان موعد العملية ما زال سارياً");
+                    } else {
+                        report.append("وقت البداية في الراوتر لا يطابق 00:00 ولا الوقت الأصلي: ")
+                                .append(two(currentHour)).append(':').append(two(currentMinute))
+                                .append(" — يلزم التحقق من التعديل اليدوي");
+                    }
+                }
             } else {
                 String reason = macPolicyEligibilityReason(current);
                 report.append(reason);
@@ -1536,12 +1556,15 @@ public class RouterBackgroundService extends Service {
                             .append(" | الأيام: ").append(current.optInt("startDay", -1))
                             .append("–").append(current.optInt("endDay", -1));
                 } else if (isValidMacValue(current.optString("mac", ""))) {
-                    report.append(" | MAC: ").append(current.optString("mac", ""));
+                    report.append(" | MAC: ").append(current.optString("mac", ""))
+                            .append(" | البداية الحالية في الراوتر: ")
+                            .append(two(current.optInt("startHour", -1))).append(':')
+                            .append(two(current.optInt("startMinute", -1)));
                 }
             }
             report.append('\n');
         }
-        report.append("\nملاحظة: كل رقم سياسة مستقل؛ تطابق أوقات البداية لا يدمج السياسات.");
+        report.append("\nملاحظة: كل رقم سياسة مستقل؛ تطابق أوقات البداية لا يدمج السياسات. حالة (تم التصفير) لا تظهر إلا بعد مطابقة قراءة الراوتر الفعلية.");
         return report.toString();
     }
 
@@ -1576,7 +1599,7 @@ public class RouterBackgroundService extends Service {
         return "مؤهلة للتصفير";
     }
 
-    private void processMacAutomationClock(JSONObject clock) {
+    private void processMacAutomationClock(JSONObject clock, List<JSONObject> currentPolicies) {
         if (macAutomationStopping || isMacStopping()) {
             restorePendingMacChangesNow();
             return;
@@ -1610,11 +1633,19 @@ public class RouterBackgroundService extends Service {
                 if (policy == null || policy.optBoolean("conflict", false)
                         || policy.optBoolean("readError", false)) continue;
 
+                int number = policy.optInt("number", -1);
+                JSONObject live = findMacPolicyByNumber(currentPolicies, number);
+                if (live == null || live.optBoolean("readError", false)) {
+                    // Never infer success from stale saved flags when this slot was not read.
+                    continue;
+                }
+                if (live.optInt("number", -1) != number || !samePolicyFieldsExceptStart(policy, live)) {
+                    markMacConflict(policy, "لا تتطابق هوية/حقول السياسة الحالية مع اللقطة المحفوظة؛ تم تجاوز الكتابة لحماية التعديلات اليدوية.");
+                    continue;
+                }
+
                 String trackingStartDate = policy.optString("trackingStartDate", "");
                 if (trackingStartDate.isEmpty()) {
-                    // New policies begin tracking on the router date first observed.
-                    // Existing policies are backfilled from the original capture date
-                    // during mergeCurrentMacPolicies().
                     trackingStartDate = date;
                     try { policy.put("trackingStartDate", trackingStartDate); }
                     catch (Exception ignored) { }
@@ -1626,15 +1657,75 @@ public class RouterBackgroundService extends Service {
                 String modifiedDate = pending
                         ? policy.optString("pendingDate", policy.optString("modifiedDate", ""))
                         : policy.optString("modifiedDate", "");
-                // Restoration is decided per policy, not globally. A stale or
-                // retrying policy must not block unrelated policies due for zeroing.
-                if (MacScheduleLogic.shouldRestorePolicy(modified, pending, pendingOperation,
-                        modifiedDate, date, dailyRestoreDue)) {
+
+                MacPolicyReconciliationLogic.Decision decision = MacPolicyReconciliationLogic.evaluate(
+                        true, true, modified, pending, pendingOperation,
+                        policy.optInt("startHour", -1), policy.optInt("startMinute", -1),
+                        live.optInt("startHour", -1), live.optInt("startMinute", -1),
+                        modifiedDate, date, dailyRestoreDue);
+
+                switch (decision) {
+                    case UNVERIFIED:
+                        continue;
+                    case CONFLICT:
+                        markMacConflict(policy, "وقت البداية الحالي في الراوتر لا يطابق 00:00 ولا الوقت الأصلي المحفوظ؛ لم أستبدل تغييراً غير معروف.");
+                        continue;
+                    case ZERO_CONFIRMED:
+                        if (pending && "zero".equals(pendingOperation)) {
+                            String completedDate = policy.optString("pendingDate", date);
+                            markMacOperationComplete(policy, true, completedDate);
+                            macAutomationZeroedCount++;
+                        }
+                        if (MacScheduleLogic.shouldRestorePolicy(true, false, "",
+                                policy.optString("modifiedDate", ""), date, dailyRestoreDue)) {
+                            restoreOperations.add(policy);
+                        }
+                        continue;
+                    case RETRY_ZERO:
+                        if (dailyRestoreDue) {
+                            // It is too late to begin a new zero window; clear the stale
+                            // tracking flag because the router already shows the original time.
+                            markMacOperationComplete(policy, false, "");
+                        } else {
+                            // A false-positive saved flag must not cause an early reset
+                            // if the router clock moved backwards before this policy's start.
+                            if (!pending && !MacScheduleLogic.shouldZeroStart(hour, minute,
+                                    policy.optInt("startHour", -1), policy.optInt("startMinute", -1), day,
+                                    policy.optInt("startDay", -1), policy.optInt("endDay", -1))) {
+                                continue;
+                            }
+                            if (!pending) setMacPending(policy, "zero", 0, 0, date);
+                            zeroOperations.add(policy);
+                            continue;
+                        }
+                        break;
+                    case RETRY_RESTORE:
+                        restoreOperations.add(policy);
+                        continue;
+                    case RESTORE_CONFIRMED:
+                        // The router already shows the original start time. Clear stale
+                        // ownership, then let today's normal schedule be evaluated below.
+                        markMacOperationComplete(policy, false, "");
+                        break;
+                    case NONE:
+                    default:
+                        break;
+                }
+
+                // A pending operation was reconciled above. Normal scheduling now
+                // applies only to policies that are not still owned by an operation.
+                if (policy.optBoolean("conflict", false)
+                        || policy.optBoolean("modified", false)
+                        || policy.optBoolean("pending", false)) continue;
+
+                if (MacScheduleLogic.shouldRestorePolicy(policy.optBoolean("modified", false),
+                        policy.optBoolean("pending", false), policy.optString("pendingOperation", ""),
+                        policy.optString("modifiedDate", ""), date, dailyRestoreDue)) {
                     restoreOperations.add(policy);
                     continue;
                 }
 
-                if (MacScheduleLogic.shouldAttemptZeroPolicy(modified, pending, pendingOperation)) {
+                if (MacScheduleLogic.shouldAttemptZeroPolicy(false, false, "")) {
                     if (MacScheduleLogic.shouldZeroStartWithCatchUp(hour, minute,
                             policy.optInt("startHour", -1), policy.optInt("startMinute", -1), day,
                             policy.optInt("startDay", -1), policy.optInt("endDay", -1),
@@ -1748,9 +1839,17 @@ public class RouterBackgroundService extends Service {
             if (error != null || current == null) { callback.onResult(false, error == null ? "تعذرت قراءة السياسة." : error); return; }
             String expectedMac = normalizeMac(original.optString("mac", ""));
             String currentMac = normalizeMac(current.optString("mac", ""));
-            if (!expectedMac.equals(currentMac)) {
-                markMacConflict(original, "تغيّر MAC في خانة السياسة " + number + ".");
-                callback.onResult(false, "تغيّر MAC؛ تم تجاوز الخانة دون الكتابة على جهاز آخر.");
+            if (current.optInt("number", -1) != number || !expectedMac.equals(currentMac)) {
+                markMacConflict(original, "رقم الخانة أو MAC في الراوتر لا يطابق السياسة المحفوظة.");
+                callback.onResult(false, "رقم الخانة أو MAC غير مطابق؛ تم تجاوزها دون الكتابة على جهاز آخر.");
+                return;
+            }
+            // Validate every stable field before accepting a pending target as
+            // already applied. Matching only MAC + 00:00 can falsely confirm a
+            // stale/previous slot (the reported policy-8 failure mode).
+            if (!samePolicyFieldsExceptStart(original, current)) {
+                markMacConflict(original, "حقول السياسة الحالية لا تطابق اللقطة الأصلية المحفوظة.");
+                callback.onResult(false, "تغيرت حقول السياسة؛ لم أعتبر التصفير/الاستعادة ناجحة ولم أكتب فوق التغيير.");
                 return;
             }
             int originalHour = original.optInt("startHour", -1);
@@ -1767,7 +1866,8 @@ public class RouterBackgroundService extends Service {
             int pendingMinute = original.optInt("pendingTargetMinute", -1);
             if (pending && currentHour == pendingHour && currentMinute == pendingMinute) {
                 boolean wasZero = "zero".equals(original.optString("pendingOperation", ""));
-                markMacOperationComplete(original, wasZero, date);
+                String completedDate = wasZero ? original.optString("pendingDate", date) : date;
+                markMacOperationComplete(original, wasZero, completedDate);
                 if (wasZero) macAutomationZeroedCount++; else macAutomationRestoredCount++;
                 callback.onResult(true, "تم التحقق من عملية محفوظة سابقاً."); return;
             }
@@ -1816,6 +1916,7 @@ public class RouterBackgroundService extends Service {
                 }
                 mainHandler.postDelayed(() -> reloadMacAutomationFrame(() -> readMacPolicyAt(number, 0, (verified, verifyError) -> {
                     if (verifyError != null || verified == null
+                            || verified.optInt("number", -1) != number
                             || !expectedMac.equals(normalizeMac(verified.optString("mac", "")))
                             || verified.optInt("startHour", -1) != targetHour
                             || verified.optInt("startMinute", -1) != targetMinute
@@ -1831,7 +1932,8 @@ public class RouterBackgroundService extends Service {
     }
 
     private boolean samePolicyFieldsExceptStart(JSONObject before, JSONObject after) {
-        return normalizeMac(before.optString("mac", "")).equals(normalizeMac(after.optString("mac", "")))
+        return before.optInt("number", -1) == after.optInt("number", -2)
+                && normalizeMac(before.optString("mac", "")).equals(normalizeMac(after.optString("mac", "")))
                 && before.optString("name", "").equals(after.optString("name", ""))
                 && before.optInt("endHour", -1) == after.optInt("endHour", -2)
                 && before.optInt("endMinute", -1) == after.optInt("endMinute", -2)
@@ -1934,7 +2036,7 @@ public class RouterBackgroundService extends Service {
     }
 
     private void readMacPolicyAt(int number, int attempt, JsonResultCallback callback) {
-        String selectJs = "(function(){try{var f=document.getElementById('tendaW303MacAutomationFrame'),d=f&&f.contentDocument,s=d&&d.getElementById('curNum'),form=d&&(d.forms['frmSetup']||d.querySelector('form'));if(!s||!form)return JSON.stringify({ok:false,error:'صفحة MAC غير جاهزة'});var n=" + JSONObject.quote(String.valueOf(number)) + ";var found=false;for(var i=0;i<s.options.length;i++)if(String(s.options[i].value)===n)found=true;if(!found)return JSON.stringify({ok:false,error:'رقم السياسة غير موجود'});if(String(s.value)!==n){s.value=n;if(typeof s.onchange==='function')s.onchange.call(s);else if(typeof d.defaultView.onChangeNum==='function')d.defaultView.onChangeNum(form);else s.dispatchEvent(new d.defaultView.Event('change',{bubbles:true}));}return JSON.stringify({ok:true,selected:String(s.value)});}catch(e){return JSON.stringify({ok:false,error:String(e)});}})()";
+        String selectJs = "(function(){try{var f=document.getElementById('tendaW303MacAutomationFrame'),d=f&&f.contentDocument,s=d&&d.getElementById('curNum'),form=d&&(d.forms['frmSetup']||d.querySelector('form'));if(!s||!form)return JSON.stringify({ok:false,error:'صفحة MAC غير جاهزة'});var n=" + JSONObject.quote(String.valueOf(number)) + ";var found=false;for(var i=0;i<s.options.length;i++)if(String(s.options[i].value)===n)found=true;if(!found)return JSON.stringify({ok:false,error:'رقم السياسة غير موجود'});s.value=n;if(typeof s.onchange==='function')s.onchange.call(s);else if(typeof d.defaultView.onChangeNum==='function')d.defaultView.onChangeNum(form);else s.dispatchEvent(new d.defaultView.Event('change',{bubbles:true}));return JSON.stringify({ok:true,selected:String(s.value)});}catch(e){return JSON.stringify({ok:false,error:String(e)});}})()";
         macAutomationWebView.evaluateJavascript(selectJs, raw -> {
             JSONObject selected = parseJsJson(raw);
             if (selected == null || !selected.optBoolean("ok", false)) {
@@ -1942,15 +2044,15 @@ public class RouterBackgroundService extends Service {
                 else callback.onResult(null, selected == null ? "تعذر اختيار السياسة." : selected.optString("error"));
                 return;
             }
-            // The W303 firmware updates form fields after curNum changes. Wait for
-            // the selected slot's values to settle, then require two matching reads
-            // before trusting them. This prevents stale fields from the prior slot.
-            mainHandler.postDelayed(() -> readMacPolicyStableSnapshot(number, 0, null, callback), 650L);
+            // The W303 firmware updates form fields after curNum changes. Always
+            // re-trigger the slot handler, then require three matching snapshots
+            // before trusting the selected slot; this reduces stale-slot false reads.
+            mainHandler.postDelayed(() -> readMacPolicyStableSnapshot(number, 0, null, 0, callback), 650L);
         });
     }
 
     private void readMacPolicyStableSnapshot(int number, int stabilityAttempt,
-                                             JSONObject previousSnapshot,
+                                             JSONObject previousSnapshot, int stableMatches,
                                              JsonResultCallback callback) {
         String readJs = "(function(){try{var f=document.getElementById('tendaW303MacAutomationFrame'),d=f&&f.contentDocument,s=d&&d.getElementById('curNum'),form=d&&(d.forms['frmSetup']||d.querySelector('form'));if(!s||!form||String(s.value)!==" + JSONObject.quote(String.valueOf(number)) + ")return JSON.stringify({ok:false,error:'لم تكتمل قراءة السياسة المختارة'});" +
                 "function v(id){var e=form.querySelector('#'+id);return e?String(e.value||''):'';}var parts=form.querySelectorAll('input[id=\\\"mac\\\"]'),m=[];for(var i=0;i<parts.length;i++)m.push((parts[i].value||'').trim().toUpperCase());" +
@@ -1958,9 +2060,9 @@ public class RouterBackgroundService extends Service {
         macAutomationWebView.evaluateJavascript(readJs, raw -> {
             JSONObject current = parseJsJson(raw);
             if (current == null || !current.optBoolean("ok", false)) {
-                if (stabilityAttempt < 3) {
+                if (stabilityAttempt < 8) {
                     mainHandler.postDelayed(() ->
-                            readMacPolicyStableSnapshot(number, stabilityAttempt + 1, previousSnapshot, callback), 250L);
+                            readMacPolicyStableSnapshot(number, stabilityAttempt + 1, previousSnapshot, stableMatches, callback), 250L);
                 } else {
                     callback.onResult(null, current == null ? "تعذر قراءة حقول السياسة." : current.optString("error"));
                 }
@@ -1971,14 +2073,20 @@ public class RouterBackgroundService extends Service {
 
             if (previousSnapshot == null) {
                 mainHandler.postDelayed(() ->
-                        readMacPolicyStableSnapshot(number, stabilityAttempt + 1, current, callback), 200L);
+                        readMacPolicyStableSnapshot(number, stabilityAttempt + 1, current, 0, callback), 200L);
                 return;
             }
             if (sameMacPolicyReadSnapshot(previousSnapshot, current)) {
-                callback.onResult(current, null);
-            } else if (stabilityAttempt < 4) {
+                int nextStableMatches = stableMatches + 1;
+                if (nextStableMatches >= 2) {
+                    callback.onResult(current, null);
+                } else {
+                    mainHandler.postDelayed(() ->
+                            readMacPolicyStableSnapshot(number, stabilityAttempt + 1, current, nextStableMatches, callback), 200L);
+                }
+            } else if (stabilityAttempt < 8) {
                 mainHandler.postDelayed(() ->
-                        readMacPolicyStableSnapshot(number, stabilityAttempt + 1, current, callback), 250L);
+                        readMacPolicyStableSnapshot(number, stabilityAttempt + 1, current, 0, callback), 250L);
             } else {
                 callback.onResult(null, "حقول السياسة " + number
                         + " لم تستقر بعد تغيير الاختيار؛ أُهملت القراءة غير المؤكدة وستعاد المحاولة في الدورة التالية.");

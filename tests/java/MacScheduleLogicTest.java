@@ -18,6 +18,9 @@ public final class MacScheduleLogicTest {
         countsSameTimePolicySlotsByNumberNotByTime();
         countsAllTenPolicySlotsIndependently();
         keepsAutomationActiveWhenNoPolicyIsEligible();
+        reconcilesSavedZeroFlagsAgainstTheLiveRouter();
+        retriesPendingOperationsOnlyWhenLiveValuesAllowIt();
+        refusesToClaimSuccessForUnverifiedOrChangedPolicies();
         System.out.println("MAC schedule logic tests: " + passed + " passed.");
     }
 
@@ -152,6 +155,67 @@ public final class MacScheduleLogicTest {
                 "the service remains active while a policy still needs restoration");
         check(!MacScheduleLogic.shouldKeepAutomationTaskActive(false, false, false),
                 "the MAC task can stop when disabled and no restoration is pending");
+    }
+
+    private static void reconcilesSavedZeroFlagsAgainstTheLiveRouter() {
+        check(MacPolicyReconciliationLogic.evaluate(true, true, true, false, "",
+                18, 0, 0, 0, "2026-11-26", "2026-11-26", false)
+                == MacPolicyReconciliationLogic.Decision.ZERO_CONFIRMED,
+                "saved modified flag is confirmed only when the live router shows 00:00");
+        check(MacPolicyReconciliationLogic.evaluate(true, true, true, false, "",
+                18, 0, 18, 0, "2026-11-26", "2026-11-26", false)
+                == MacPolicyReconciliationLogic.Decision.RETRY_ZERO,
+                "policy 8 style false-positive is detected and queued for a same-day retry");
+        check(MacPolicyReconciliationLogic.evaluate(true, true, true, false, "",
+                18, 0, 18, 0, "2026-11-25", "2026-11-26", false)
+                == MacPolicyReconciliationLogic.Decision.RESTORE_CONFIRMED,
+                "a policy already showing its original time on a later date clears stale ownership");
+        check(MacPolicyReconciliationLogic.evaluate(true, true, true, false, "",
+                18, 0, 0, 0, "2026-11-25", "2026-11-26", false)
+                == MacPolicyReconciliationLogic.Decision.ZERO_CONFIRMED,
+                "a zeroed policy from an earlier date remains owned and can be restored as overdue");
+    }
+
+    private static void retriesPendingOperationsOnlyWhenLiveValuesAllowIt() {
+        check(MacPolicyReconciliationLogic.evaluate(true, true, false, true, "zero",
+                18, 0, 18, 0, "2026-11-26", "2026-11-26", false)
+                == MacPolicyReconciliationLogic.Decision.RETRY_ZERO,
+                "pending zero retries when router still shows the original start time");
+        check(MacPolicyReconciliationLogic.evaluate(true, true, false, true, "zero",
+                18, 0, 0, 0, "2026-11-26", "2026-11-26", false)
+                == MacPolicyReconciliationLogic.Decision.ZERO_CONFIRMED,
+                "pending zero is confirmed only after a live 00:00 read");
+        check(MacPolicyReconciliationLogic.evaluate(true, true, false, true, "restore",
+                18, 0, 0, 0, "2026-11-26", "2026-11-26", false)
+                == MacPolicyReconciliationLogic.Decision.RETRY_RESTORE,
+                "pending restore retries while the router still shows 00:00");
+        check(MacPolicyReconciliationLogic.evaluate(true, true, false, true, "restore",
+                18, 0, 18, 0, "2026-11-26", "2026-11-26", false)
+                == MacPolicyReconciliationLogic.Decision.RESTORE_CONFIRMED,
+                "pending restore is confirmed when the original time is already present");
+        check(MacPolicyReconciliationLogic.evaluate(true, true, false, true, "zero",
+                18, 0, 18, 0, "2026-11-26", "2026-11-26", true)
+                == MacPolicyReconciliationLogic.Decision.RESTORE_CONFIRMED,
+                "a missed zero is not started at or after the 23:55 restoration window");
+    }
+
+    private static void refusesToClaimSuccessForUnverifiedOrChangedPolicies() {
+        check(MacPolicyReconciliationLogic.evaluate(false, false, true, false, "",
+                18, 0, 0, 0, "2026-11-26", "2026-11-26", false)
+                == MacPolicyReconciliationLogic.Decision.UNVERIFIED,
+                "a read error never becomes a successful zero report");
+        check(MacPolicyReconciliationLogic.evaluate(true, false, true, false, "",
+                18, 0, 0, 0, "2026-11-26", "2026-11-26", false)
+                == MacPolicyReconciliationLogic.Decision.CONFLICT,
+                "changed identity fields prevent a false success and protect manual edits");
+        check(MacPolicyReconciliationLogic.evaluate(true, true, true, false, "",
+                18, 0, 17, 30, "2026-11-26", "2026-11-26", false)
+                == MacPolicyReconciliationLogic.Decision.CONFLICT,
+                "an unexpected nonzero start time is not silently accepted");
+        check(MacPolicyReconciliationLogic.evaluate(true, true, false, false, "",
+                18, 0, 18, 0, "", "2026-11-26", false)
+                == MacPolicyReconciliationLogic.Decision.NONE,
+                "untracked unchanged policy proceeds through normal schedule evaluation");
     }
 
     private static void check(boolean ok, String message) {
