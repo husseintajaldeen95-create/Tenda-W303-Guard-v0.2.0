@@ -142,6 +142,13 @@ public class MainActivity extends Activity {
                 macAutomationRunning = intent.getBooleanExtra(RouterBackgroundService.EXTRA_MAC_ACTIVE, false);
                 String message = intent.getStringExtra(RouterBackgroundService.EXTRA_MAC_STATUS);
                 updateMacAutomationUi(message == null ? "حالة أتمتة MAC غير متاحة." : message);
+            } else if (RouterBackgroundService.ACTION_DEVICES.equals(action)) {
+                String dhcpJson = intent.getStringExtra(RouterBackgroundService.EXTRA_DHCP_JSON);
+                String wifiJson = intent.getStringExtra(RouterBackgroundService.EXTRA_WIFI_JSON);
+                if (dhcpJson != null) renderClients(dhcpJson);
+                if (wifiJson != null) renderWirelessClients(wifiJson);
+                String deviceMessage = intent.getStringExtra(RouterBackgroundService.EXTRA_DEVICE_STATUS);
+                if (deviceMessage != null && !deviceMessage.trim().isEmpty()) status(deviceMessage);
             } else if (RouterBackgroundService.ACTION_TRAFFIC.equals(action)) {
                 String json = intent.getStringExtra(RouterBackgroundService.EXTRA_JSON);
                 String source = intent.getStringExtra(RouterBackgroundService.EXTRA_SOURCE_PATH);
@@ -269,6 +276,9 @@ public class MainActivity extends Activity {
         macAutomationControls.addView(macAutomationStartButton, new LinearLayout.LayoutParams(0, -2, 2));
         macAutomationControls.addView(macAutomationStopButton, new LinearLayout.LayoutParams(0, -2, 1));
         macAutomationCard.addView(macAutomationControls, matchWrap());
+        Button macAuditButton = button("فحص تفاصيل سياسات MAC العشر", false);
+        macAuditButton.setOnClickListener(v -> showMacPolicyAudit());
+        macAutomationCard.addView(macAuditButton, matchWrap());
         macAutomationCard.addView(text("مهم: يعتمد التنفيذ على ساعة الراوتر من Time Settings وليس ساعة الهاتف. لا يلزم إبقاء واجهة التطبيق مفتوحة. إذا انقطع Wi-Fi أو أُعيد تشغيل الراوتر تنتظر الخدمة ثم تستأنف عند عودة الاتصال. لا تستخدم Force stop ولا تمسح بيانات التطبيق أثناء وجود سياسات معدّلة.", 11, false, MUTED), matchWrap());
 
         gap(root, 10);
@@ -1470,6 +1480,22 @@ public class MainActivity extends Activity {
 
     // ---------------- MAC schedule automation ----------------
 
+    private void showMacPolicyAudit() {
+        android.content.SharedPreferences bg = getSharedPreferences(RouterBackgroundService.PREFS_NAME, MODE_PRIVATE);
+        String report = bg.getString(RouterBackgroundService.PREF_MAC_LAST_SCAN_REPORT, "");
+        long scannedAt = bg.getLong(RouterBackgroundService.PREF_MAC_LAST_SCAN_AT, 0L);
+        if (report == null || report.trim().isEmpty()) {
+            report = "لم يُسجّل فحص تفصيلي بعد. شغّل التصفير التلقائي واترك الخدمة تكمل أول دورة قراءة.";
+        } else if (scannedAt > 0L) {
+            report = report + "\n\nآخر تحديث محفوظ: " + formatTime(scannedAt);
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("تفاصيل فحص سياسات MAC")
+                .setMessage(report)
+                .setPositiveButton("إغلاق", null)
+                .show();
+    }
+
     private void startMacAutomation() {
         if (webView == null || webView.getUrl() == null || !isAllowedRouterUri(Uri.parse(webView.getUrl()))) {
             toast("اتصل بالراوتر وسجّل الدخول أولاً.");
@@ -2312,6 +2338,7 @@ public class MainActivity extends Activity {
         filter.addAction(RouterBackgroundService.ACTION_STATUS);
         filter.addAction(RouterBackgroundService.ACTION_TRAFFIC);
         filter.addAction(RouterBackgroundService.ACTION_MAC_STATUS);
+        filter.addAction(RouterBackgroundService.ACTION_DEVICES);
         try {
             if (Build.VERSION.SDK_INT >= 33) {
                 registerReceiver(backgroundMonitorReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
@@ -2336,6 +2363,20 @@ public class MainActivity extends Activity {
                 ? "أتمتة MAC محفوظة في الخدمة الخلفية؛ تستمر حتى عند إغلاق واجهة التطبيق."
                 : "التصفير التلقائي متوقف.");
         restoreLastTrafficSnapshot();
+        restoreLastDeviceSnapshots();
+    }
+
+    private void restoreLastDeviceSnapshots() {
+        android.content.SharedPreferences bg = getSharedPreferences(RouterBackgroundService.PREFS_NAME, MODE_PRIVATE);
+        String dhcpJson = bg.getString(RouterBackgroundService.PREF_LAST_DHCP_JSON, null);
+        String wifiJson = bg.getString(RouterBackgroundService.PREF_LAST_WIFI_JSON, null);
+        if (dhcpJson != null) renderClients(dhcpJson);
+        if (wifiJson != null) renderWirelessClients(wifiJson);
+        long capturedAt = bg.getLong(RouterBackgroundService.PREF_LAST_DEVICE_SCAN_AT, 0L);
+        if (capturedAt > 0L) {
+            status("آخر تحديث محفوظ لقوائم الأجهزة: " + formatTime(capturedAt)
+                    + ". تستمر الخدمة الخلفية في تحديثها كل 15 ثانية عند توفر الراوتر.");
+        }
     }
 
     @Override
